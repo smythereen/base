@@ -362,7 +362,8 @@ bumps when you want interval rate accounting around those points you define.
 ## Tutorial: one project from an empty directory to a multi-server deployment
 
 This is a complete worked example you can follow line by line. It builds a
-small **UDP echo + counter server** (`echoctr`) on the public `sys`, `far` and
+small **UDP echo + counter server** in C (`echoctr`) and in C++
+(`echoxx`, step 3b) on the public `sys`, `far` and
 `now` units, runs it locally, runs a second local instance, then ships the
 **same compiled binary** to several hosts behind a load balancer **you** own.
 
@@ -381,6 +382,7 @@ high availability: what the application must own is listed in step 12.
 |---|---|
 | Build host | Linux x86-64, `bash`, **GNU make**, `gcc`, `ar`, `ranlib`, `git`, `curl`, `tsort`, `awk`, `sed`; HTTPS access to GitHub and to the catalog worker |
 | Each server | Linux x86-64 with glibc (the program links the unit `.a` libraries statically; `ldd` shows only libc), `systemd` with user services (or just a shell, see 9b), an open UDP port |
+| C++ (optional) | `g++` on the build host; on servers, a compatible `libstdc++` **or** a static C++ runtime (step 3b) |
 | Probing | `nc` (netcat with `-u`) **or** `python3`; both forms are shown |
 
 The servers do **not** need make, gcc, git or the unit sources. They run the
@@ -579,6 +581,157 @@ Networking is plain POSIX on purpose: `far`'s `Listen4Host` is a TCP
 accept loop and `InitUDP2Host` *connects* a UDP socket to one peer, so neither
 is a UDP server bind. Use the unit APIs where they fit and libc where they
 don't—never an invented wrapper.
+
+### 3b. The same server in C++ (`echoxx`)
+
+All public units are usable from C++. The exported headers wrap their
+declarations in `#if defined( __cplusplus ) extern "C" { … }`: `common.h`,
+`far.h`, `now.h`, `map.h`, `sem.h`, `mem_io.h`, `tp.h`, `tps.h`,
+`tph.h`, `tpd.h`, `tpi.h`, `atomic_bump.h`, `cmpxchg.h`, `port.h`, `gf8.h`.
+The headers without a guard (`atomic_32.h`, `bitops.h`, `gf.h`) contain only
+`static inline` code and macros, so there is no symbol linkage to wrap. The
+libraries stay plain C archives; C++ code calls them through those
+`extern "C"` declarations, so **no wrapper header is needed** and the C ABI
+is unchanged.
+
+How the build differs (from `rules.mak`):
+
+| | C unit | C++ unit |
+|---|---|---|
+| Source suffix | `.c` | `.cc` (`.cxx` also has rules) |
+| Compiler | `$(CC)` (`export CC=gcc`) | `$(CXX)` (`export CXX=g++`) |
+| Flags | `CFLAGS` (`-g -march=native -O0 -fPIC -I$(HDR) -Wno-implicit-int -Wno-address-of-packed-member -fcommon`) | `CXXFLAGS` (`-g -march=native -O0 -fPIC -I$(HDR) -Wno-write-strings -Wno-address-of-packed-member`) |
+| Program rule | `.c` with `main(` → program in `~/bin` | `.cc` with `main(` → program in `~/bin`, **linked by `$(CXX)`** so the C++ runtime is added automatically |
+| Unit makefile | identical: `LIBRARIES = -lfar -lnow -lsys` | identical |
+
+So a C++ unit is the C unit with a `.cc` file. Release build with portable
+flags for both languages (both variables on the master make command line):
+
+```sh
+HOME=$PWD make cleanup
+HOME=$PWD make \
+  'CFLAGS=-O2 -g -march=x86-64-v2 -fPIC -fcommon -I$(HDR) -Wno-implicit-int -Wno-address-of-packed-member' \
+  'CXXFLAGS=-O2 -g -march=x86-64-v2 -fPIC -I$(HDR) -Wno-write-strings -Wno-address-of-packed-member'
+```
+
+```sh
+mkdir -p echoxx
+sed 's/echoctr/echoxx/' echoctr/makefile > echoxx/makefile    # same LIBRARIES line
+cp echoctr/UNIT.deps echoxx/
+```
+
+`echoxx/echoxx.cc`:
+
+```cpp
+// echoxx: the echoctr server in C++ (same public sys/far/now C interfaces).
+// Usage: echoxx SERVER_ID PORT
+#include	<common.h>	// extern "C" guarded
+#include	<far.h>		// extern "C" guarded
+#include	<now.h>		// extern "C" guarded
+#include	<csignal>
+#include	<cstdio>
+#include	<cstdlib>
+#include	<cstring>
+#include	<string>
+#include	<unistd.h>
+#include	<sys/socket.h>
+#include	<netinet/in.h>
+
+static volatile std::sig_atomic_t	stop_flag;
+
+extern "C" void	on_signal( int sig ) { stop_flag = sig; }
+
+int	main( int argc, char ** argv )
+{
+	int port;
+	if( argc != 3 || ( port = std::atoi( argv[ 2 ] ) ) <= 0 || port > 65535 ) {
+		std::fprintf( stderr, "usage: %s SERVER_ID PORT\n", argv[ 0 ] );
+		return 2;
+	}
+	std::string	id = argv[ 1 ];
+	LocalName = argv[ 1 ];		// char *: argv outlives the process body
+	if( const char * t = std::getenv( "ECHOXX_TRACE" ) )
+		TraceLevel = (u32)std::strtoul( t, nullptr, 0 );
+
+	std::signal( SIGTERM, on_signal );
+	std::signal( SIGINT, on_signal );
+
+	int fd = socket( AF_INET, SOCK_DGRAM, 0 ), one = 1;
+	if( fd < 0 ) { std::perror( "socket" ); return 1; }
+	setsockopt( fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof( one ) );
+	sockaddr_in	me{};
+	me.sin_family = AF_INET;
+	me.sin_addr.s_addr = htonl( INADDR_ANY );
+	me.sin_port = htons( (u16)port );
+	if( bind( fd, (sockaddr *)&me, sizeof( me ) ) < 0 ) { std::perror( "bind" ); return 1; }
+
+	u64	count = 0, started = Micro_Now( );
+	// EventLog/Trace are C varargs: pass C strings (.c_str()), never std::string
+	EventLog( (char *)"echoxx %s start port %d pid %d", id.c_str( ), port, (int)getpid( ) );
+	Trace( 0, (char *)"echoxx %s listening on udp/%d\n", id.c_str( ), port );
+
+	while( !stop_flag ) {
+		if( File_Test_For_Read_Data( fd, 1000 ) != fd ) continue;
+		char		buf[ 512 ];
+		sockaddr_in	peer{};
+		socklen_t	plen = sizeof( peer );
+		ssize_t n = recvfrom( fd, buf, sizeof( buf ) - 1, 0, (sockaddr *)&peer, &plen );
+		if( n < 0 ) continue;
+		std::string	req( buf, (size_t)n );
+		while( !req.empty( ) && ( req.back( ) == '\n' || req.back( ) == '\r' ) ) req.pop_back( );
+		++count;
+		std::string	out;
+		if( req == "ping" )
+			out = "pong " + id + " " + std::to_string( count ) + "\n";
+		else if( req == "stats" )
+			out = "id=" + id + " port=" + std::to_string( port ) + " count=" +
+			      std::to_string( count ) + " up_us=" +
+			      std::to_string( Micro_Now( ) - started ) + "\n";
+		else
+			out = req + "\n";
+		Trace( SYS_TRC_LVL, (char *)"req %llu: %s\n", (unsigned long long)count, req.c_str( ) );
+		sendto( fd, out.data( ), out.size( ), 0, (sockaddr *)&peer, plen );
+	}
+	EventLog( (char *)"echoxx %s stop signal %d count %llu",
+		  id.c_str( ), (int)stop_flag, (unsigned long long)count );
+	close( fd );
+	return 0;
+}
+```
+
+Points where C++ use differs from C (the rest is the same API):
+
+- Many public prototypes take `char *`, not `const char *` (for example
+  `EventLog( char * fmt, … )`, `LocalName` is `char *`). C++ rejects a string
+  literal there without a cast; the example casts the literal, and the default
+  `CXXFLAGS` already carries `-Wno-write-strings`.
+- `EventLog`, `Trace`/`SysPrt` are C varargs: pass `.c_str( )`, never a
+  `std::string` object.
+- Signal handlers that C code may install are declared `extern "C"`.
+- Nothing here claims the C libraries are exception-safe, RAII-managed or
+  thread-safe. Do not throw through a C callback (for example a `far`
+  `Set_FD_Read_Function` handler); catch inside it. Treat globals such as
+  `TraceLevel`, `LocalName` and far's `File_Table` as process-wide state.
+
+Build and probe exactly like the C server (`HOME=$PWD make`, then
+`./bin/echoxx node-x 7121` and `ping` / `stats`). Expected replies are the same
+format: `pong node-x 1`, `id=node-x port=7121 count=3 up_us=…`.
+
+**Runtime library:** a program linked by `g++` depends on the shared
+`libstdc++.so.6` (and `libgcc_s`) unless you link it statically. Check with
+`ldd bin/echoxx` before shipping. Either make sure every server has a
+`libstdc++` at least as new as the build host's, or add
+`-static-libstdc++ -static-libgcc` to the link (for example put them in the
+unit's `LIBRARIES` after `-lsys`). Everything else in steps 5–12
+(instances, systemd template, load balancer, rolling deploy) is identical:
+replace `echoctr` with `echoxx` in the paths and the template name.
+
+*Proof note:* the build host used for this tutorial had no `g++`, so the C++
+example was compiled through the **same** `rules.mak` `.cc` rule with a clang
+C++ driver passed as `CXX=…`, linked against the C archives `libfar.a`,
+`libnow.a`, `libsys.a`, and probed (`pong cxx 1`, echo, `stats`, SIGTERM →
+`stop signal 15 count 3` in `event.log`). With `g++` the command is the one
+`rules.mak` prints: `g++ -MD -o echoxx $(CXXFLAGS) echoxx.cc -L$(LIB) -lfar -lnow -lsys`.
 
 ### 4. Build: `make`, `units.mak`, restarts, logs
 
@@ -959,6 +1112,7 @@ blocks; the multi-server behavior above is code and config you own.
 [ ] base cloned; PROJECT_WORKER_URL / UNITS_CATALOG_URL / CC exported
 [ ] repo add far; repo add now          -> project.repos + lock
 [ ] echoctr/{makefile,UNIT.deps,echoctr.c}
+[ ] optional C++: echoxx/{makefile,UNIT.deps,echoxx.cc}; ldd shows libstdc++ plan
 [ ] HOME=$PWD make; units.mak lists echoctr; logs have no errors
 [ ] local ping/stats on two ports; SIGTERM logged in run/event.log
 [ ] release build with portable -march; tarball + SHA256SUMS + lock
