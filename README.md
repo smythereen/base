@@ -169,23 +169,28 @@ the current trees—not guessed `-l` lines.
 | Unit | `UNIT.deps` require | `LIBRARIES` (link) | Notes |
 |---|---|---|---|
 | atomic | — | *(empty)* | headers only |
-| sys | atomic | *(empty)* | needs atomic headers in `~/cmn` |
+| sys | atomic | *(empty)* | direct header dep (`atomic_32.h` / `S32_*`); not link `-latomic` |
 | far | sys | `-lsys` | |
 | sem | sys | `-lsys` | e.g. `ErrorLog` / sys symbols |
 | map | sem, sys | `-lsem -lsys` | |
-| now | sys | *(empty)* | **header** dependency on `common.h` only |
-| mio | now, sys | *(empty)* | dependents typically supply `-lnow` when linking mio users |
-| tp | far, map, mio, now, sem, sys | `-lmio -lnow -lmap -lsem -lfar -lsys` | |
-| tpi | far, map, mio, now, sem, sys | `-lmio -lmap -lsem -lfar -lnow -lsys` | |
+| now | sys | *(empty)* | **header** only (`now.h` → `common.h`); does **not** include atomic |
+| mio | now, sys | *(empty)* | `mem_in`/`mem_out` include `now.h`; dependents usually `-lnow` |
+| tp | far, map, mio, now, sem, sys | `-lmio -lnow -lmap -lsem -lfar -lsys` | also `#include <atomic_32.h>` / `S32_*` in sources; **`UNIT.deps` omits `require atomic`** (header gap) |
+| tpi | far, map, mio, now, sem, sys | `-lmio -lmap -lsem -lfar -lnow -lsys` | same: sources include `atomic_32.h`; **`UNIT.deps` omits `require atomic`** |
 
 Fetch order observed on a fresh starter resolve (dependencies first):
 `atomic → sys → now → sem → far → mio → map → tpi → tp`.
 
+**Atomic:** `sys` **does** depend on unit `atomic` (`UNIT.deps` + `sysprt.c` uses
+`S32_*`). `atomic` is intentionally a separate unit (provides `atomic_32.h`).
+`now` does not pull atomic indirectly. `tp`/`tpi` use atomic headers in code but
+their current public `UNIT.deps` do not yet list `require atomic`—fetch still
+works when `atomic` is already present via `sys` / the starter list.
+
 **Build note:** a tree that lacks `atomic` headers in `~/cmn` can fail `sys`
-(and anything including paths that pull atomics) before tests are meaningful.
+(and `tp`/`tpi` sources that include `atomic_32.h`) before tests are meaningful.
 Always run the root **header** phase (or a plain `make`) so `atomic` exports
-first. This was exercised with `HOME=$PWD make` against the live catalog on
-Linux x86-64.
+first. Exercised with `HOME=$PWD make` against the live catalog on Linux x86-64.
 
 ## Catalog vs project list
 
