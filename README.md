@@ -352,6 +352,152 @@ bumps when you want interval rate accounting around those points you define.
 
 ---
 
+
+## How the units work together
+
+Individual unit READMEs describe one library. A live service is a **stack**:
+shared state, inspectors, I/O waits, optional messaging, and your application
+on top. This section is the integrated story.
+
+### Public starter stack (what `make` fetches for project `NONE`)
+
+```text
+                    ┌─────────────────────────┐
+                    │   your application      │
+                    │   (protocol, policy,    │
+                    │    supervision, HA…)    │
+                    └───────────┬─────────────┘
+          rate / intervals      │      files / sockets / select
+               ┌────────────────┼────────────────┐
+               ▼                ▼                ▼
+            tp / tpi          far              map ──► shared .mem files
+               │                │                │
+               └──────┬─────────┴───────┬────────┘
+                      ▼                 ▼
+                     mio               sem
+                      │                 │
+                      ▼                 ▼
+                     now               sys ◄── atomic (headers)
+```
+
+| Layer | Units | How they cooperate |
+|---|---|---|
+| Foundations | `sys`, `atomic` | `sys` gives types (`common.h`), process helpers, `EventLog` / print paths. `atomic` supplies `atomic_32.h` / `S32_*` for lock-prefixed counters. `sys` **requires** `atomic` (headers). |
+| Time | `now` | Microsecond clocks/stamps. Needs `sys` **headers** only (`common.h`); does not include atomic itself. |
+| Shared memory | `map`, `sem` | `map` mmaps files into the process (`Map`, `MapFile2Mem`, `UpdateMap`). `sem` is optional SysV-style mutual exclusion when several processes touch the same region—use it when you need those helpers, not by default for every map. `map` links `-lsem -lsys`. |
+| Structured fields | `mio` | `Mitem` tables describe struct fields; `Input_Memory_Item` / `Output_Memory_Item` parse and print them. Works on **any** memory you point at—commonly a `map` region. Fetch needs `now`+`sys`; library `LIBRARIES` is empty (callers link `-lnow` when needed). **mio is not a message bus.** |
+| File / socket I/O | `far` | **File Access Routines** (not “far calls”): open/read/write, dirs, FIFOs, sockets (`Listen4Host`), and `File_Test_For_Read_Data` (`select` with timeout). Links `-lsys`. |
+| Rate accounting | `tp`, `tpi` | **Transactions Per** / **Transactions Per Interval** counters over mapped memory, with `mio` field tables for operator tools (`tp`, `*mem`, `tpi`, …). Link mio/map/far/sem/now/sys. Sources also use `atomic_32.h` even though current `UNIT.deps` omit `require atomic`. |
+
+#### Concrete path: map + mio (live shared state you can inspect)
+
+1. Define a C struct for control/data plane state (counters, flags, config).
+2. Build an `Mitem[]` table (as `tp`/`tpi` do) naming each field for `mio`.
+3. Persist the struct in a file and `MapFile2Mem` it (`map`) so every process
+   sees the same bytes.
+4. Operators run a small `*mem`-style tool: `Output_Memory_Item` to print live
+   fields, `Input_Memory_Item` to patch a value, then `UpdateMap` if required.
+5. **No automatic lock:** `map`+`mio` do not serialize writers. Add `sem` (or
+   your own protocol) when concurrent mutation must be safe.
+6. Minimum public units for this pattern: `map`, `mio`, `sys`, `now` (and
+   `sem` if you lock). `tp` builds on the same idea with interval arrays.
+
+#### Concrete path: far wait + your accept loop
+
+`far` can listen (`Listen4Host`) and wait for readability
+(`File_Test_For_Read_Data`: timeout `<0` forever, `0` poll, `>0` milliseconds).
+Your code still owns framing, authentication, backpressure, and what “done”
+means for a request. Pair with `map`/`mio` for shared control blocks and
+`tp`/`tpi` if you bump per-interval rates around work you define.
+
+#### Concrete path: atomic counters across processes
+
+Put `atom_32` / `S32_*` fields inside a `map` region so workers share counters
+without a full message round-trip. `sys` already uses this pattern internally
+(e.g. print stamp). `tp`/`tpi` bump paths use the same primitives on mapped
+interval state.
+
+---
+
+### Extended messaging stack (`addr` + `msg` + `near`) — conceptual
+
+John’s larger real-time servers often add three **extra** units that cooperate
+as a messaging plane. They are **not** on the public starter list
+(`sys atomic far map sem now mio tp tpi`), **not** in the public catalog worker
+used by default, and **`make` / `repo fetch` will not download them** unless
+**you** supply URLs (for example via `private.units` in your own project).
+
+This README describes their **roles and how they fit architecturally**, from
+local project experience. It does **not** publish private source, secret APIs,
+or fetch endpoints.
+
+| Unit | Role (architecture) |
+|---|---|
+| **addr** | Endpoint identity: a compact address (machine / group / program / subtask) and **name ↔ number** tables (often in mapped `addr.mem`) so humans and tools speak readable names while the wire uses numbers. |
+| **msg** | In-process / inter-process **message** allocation and passing: a header (sync, source, target, function/type, length, timing fields) plus body; send/receive toward an address. Builds on addressing; typically sits on `map`/`far`/`sys` style foundations. |
+| **near** | **Network Enhanced Access Routines**: UDP / UNIX-domain (and related) helpers so messages **traverse machines**—the transport edge of the messaging plane. |
+
+#### Choose the chain (application → transport → message → address)
+
+Think in layers when you design a multi-process or multi-host service:
+
+```text
+  Your application logic
+        │  decides what happened / what to ask
+        ▼
+  near   ── network path between machines (when the peer is remote)
+        │
+        ▼
+  msg    ── message in flight (header + body, source/target, function)
+        │
+        ▼
+  addr   ── who is “target” / “source” (stable endpoint id ↔ name)
+```
+
+- **Local workers on one host:** application ↔ `msg` (and `addr` for names),
+  often with `map` shared control; `near` may be unused or only for local
+  UNIX sockets depending on deployment.
+- **Remote route:** application → `near` (get bytes to the other machine) →
+  peer `msg` stack → `addr` to interpret who the message is for.
+- **Code roles:** `addr` does not carry payloads; `msg` does not replace your
+  protocol semantics (it carries *your* function codes); `near` does not
+  decide business logic—it moves datagrams/streams you hand it.
+
+#### How this relates to the public `mio` / `map` plane
+
+| Concern | Public units | Extended messaging |
+|---|---|---|
+| Shared struct fields operators can print/patch | `map` + `mio` (+ `sys`/`now`) | optional alongside messaging |
+| Request/event between programs or hosts | *(you write it, or use extended stack)* | `msg` + `addr` (+ `near` off-box) |
+| “Is mio messaging?” | **No.** mio = memory field representation | `msg` = message passing |
+
+Optional message-oriented hooks inside some memory tooling are a **private /
+extended** concern. The public `mio` unit is the structured memory printer and
+parser.
+
+#### Obtaining `msg` / `addr` / `near`
+
+They are **not** returned by `GET /projects/NONE` and are **not** looked up in
+the public catalog used with the published starter. In John’s extended or
+private projects they are ordinary units: list them in `project.repos` and put
+their git URLs in **`private.units`** (or another catalog you run yourself).
+Public base does not document private cloud fetch URLs. If you only clone
+public GitHub starter units, you will not get `msg`/`addr`/`near`.
+
+---
+
+### Picking a stack for a 24/7 service (summary)
+
+1. **Always (public):** `base` → fetch `sys`+`atomic`; add `far` for I/O waits.
+2. **Shared live state:** `map` (+ `sem` if you need those locks) + `mio`/`now`
+   for operator-visible fields; `tp`/`tpi` if you want interval rates.
+3. **Multi-program messaging on your private tree:** add `addr`+`msg`, and
+   `near` when hosts must talk—via **your** `private.units`, not the public
+   starter catalog.
+4. **Still your job:** protocol, accept-loop policy, batching, backpressure,
+   systemd/watchdogs, multi-host failover, durable storage, metrics/alerting.
+
+
 ## Portability limits
 
 GNU make + Unix `cc`/`ar`/`ranlib` on **Linux**. Public `sys` is
