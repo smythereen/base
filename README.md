@@ -204,6 +204,51 @@ create/delete/governance API documented in base.
 
 ---
 
+## The `<unit>mem` provisioning and restart contract
+
+This is the rule every unit's shared memory follows. New or updated tools
+should follow it too.
+
+**Server processes only map memory that was provisioned beforehand.** They do
+not create or default their own configuration. A `<unit>mem` program (the
+unit's name plus `mem`, built with the unit) provisions, prints and changes
+that memory by field name. It uses the unit's **mio** descriptor table, an
+`Mitem` list.
+
+Order on a host: **build (`make`) → provision with `<unit>mem` → start the
+servers.** Provisioning happens before the first start, not before the build.
+
+| Rule | Meaning |
+|---|---|
+| One fixed place | The tool and the server use the same deterministic file name or path: for example `near_<BOX>.mem` under `$MEMORY_PATH` for `nearmem BOX`, or an absolute path. Relative names are resolved under `$MEMORY_PATH`, so be consistent or use absolute paths. |
+| Tool creates, server maps | Only the `<unit>mem` tool (or an equivalent operator tool) may create or "force existence" of the file. The server maps the existing file. It exits non-zero when the file is missing, the wrong size or not valid, and the supervisor's start limit makes that visible. |
+| Field names, not bytes | `<unit>mem FILE_OR_BOX [ C.Variable.Name [ Value ] ]`. With no name it prints every field; with a name it prints that field; with a name and value it sets the field and prints it. Names are the C member names in the descriptor table, and nested structs and arrays keep stable names. |
+| Output is a script | Each printed line is a complete `<unit>mem …` command. A dump is therefore a reload script for backup, review, cloning a role, or a layout change (P10). |
+| Persist, then unmap | After a change the tool flushes (`UpdateMap`/`msync`) before it unmaps and exits. |
+| Fail loudly | A tool should exit non-zero on an unknown field or a value it cannot parse. Core mio's `Input_Memory_Item` returns `void` and reports no errors, so either the tool checks first or the operator re-reads the values. Not every existing tool does this yet. |
+| Trusted input only | Scripts come from operators and stay in protected ops records. Never load them from the network or build them from untrusted text, and quote string values yourself. mio prints text fields; it is not a format for arbitrary binary data or secrets. |
+| Layout changes | Never map an old file with a newer layout, because `MapFile2Mem` resizes the file to the new size. Dump with the old tool, create a new file with the new tool, load it, and verify (P10). |
+
+Examples from the published sources:
+
+- `nearmem BOX [ C.Variable.Name [ Value ] ]` (near unit) maps `near_BOX.mem`
+  with `Near_Map(box, 1)` (force existence). It prints and sets the fields of
+  `near_l`, such as `trace`, `name`, `state`, `box_adr` and the nested `path`
+  connection structs. Run `nearmem BOX` to see the exact names your build
+  prints. It needs `miomsg` (`MioMsgInit`), so it cannot be built from the
+  published sources alone today.
+- `tpmem tp.mem [ C.Variable.Name [ Value ] ]` and the other `tp`/`tpi`
+  `*mem` tools use the same print/set form.
+- `meridianmem FILE [ Name [ Value ] ]` and `meridianmem --create FILE` in
+  Tutorial part 2 are a complete, tested example. That tool also rejects
+  unknown names and bad numbers.
+
+Redeploying, adding a spare host, or rebuilding from a source backup restores
+**source and executables** only. The provisioned memory is separate: each host
+gets it from its `<unit>mem` scripts, and base does not generate or copy it.
+
+---
+
 ## Build your own custom high-performance real-time 24/7 server project
 
 This section is a **practical project guide** using only public facilities.
@@ -1545,7 +1590,7 @@ typedef	struct	{
 
 ```c
 /* mexec: execution role.  Startup order:
- *   1. map the persistent state file (never truncate an existing one)
+ *   1. map the operator-provisioned state file (never create or resize it)
  *   2. validate magic/version, bump generation
  *   3. MsgInit: create/attach this role's msg FIFO + buffer file
  *   4. MsgRead loop: resume with the next message already queued
@@ -1568,37 +1613,24 @@ static	MerState_t *	map_state( char * path )
 {
 	struct	stat	sb;
 	MerState_t *	st;
-	int		fresh;
 
-	if( stat( path, &sb ) == 0 ) {
-		if( sb.st_size != (off_t)sizeof( MerState_t ) )
-			FatalError( "mexec: %s is %lld bytes, expected %u; refusing to resize",
-				path, (long long)sb.st_size, (unsigned)sizeof( MerState_t ) );
-		fresh = 0;
-	} else if( errno == ENOENT ) {
-		/* create it ourselves (O_EXCL: never truncate an existing file),
-		 * so map's own stat() sees a real file before it maps it */
-		int fd = open( path, O_RDWR | O_CREAT | O_EXCL, 0600 );
-		if( fd < 0 || ftruncate( fd, sizeof( MerState_t ) ) != 0 )
-			FatalError( "mexec: create %s: %s", path, strerror( errno ) );
-		close( fd );
-		fresh = 1;
-	} else {
-		FatalError( "mexec: stat %s: %s", path, strerror( errno ) );
-		return( NULL );
-	}
+	/* The state file is provisioned by the operator (meridianmem --create) before
+	 * the first start.  mexec never creates or resizes it: a missing or
+	 * wrong file is a fatal error, so the supervisor's start limit trips and
+	 * someone looks, instead of the service starting from empty state. */
+	if( path[ 0 ] != '/' )
+		FatalError( "mexec: state path %s is not absolute", path );
+	if( stat( path, &sb ) != 0 )
+		FatalError( "mexec: %s: %s (provision it with meridianmem --create)",
+			path, strerror( errno ) );
+	if( sb.st_size != (off_t)sizeof( MerState_t ) )
+		FatalError( "mexec: %s is %lld bytes, expected %u; refusing to resize",
+			path, (long long)sb.st_size, (unsigned)sizeof( MerState_t ) );
 	if( ( st = (MerState_t *)MapFile2Mem( path, sizeof( MerState_t ), PROT_WRITE ) ) == NULL )
 		FatalError( "mexec: cannot map %s", path );
-	if( fresh ) {
-		memset( st, 0, sizeof( *st ) );
-		st->version = MER_VERSION;
-		st->magic = MER_MAGIC;		/* written last: marks it valid */
-		msync( st, sizeof( *st ), MS_SYNC );
-		EventLog( "mexec: created state %s", path );
-	} else if( st->magic != MER_MAGIC || st->version != MER_VERSION ) {
-		FatalError( "mexec: %s has magic %08X version %u; not ours",
+	if( st->magic != MER_MAGIC || st->version != MER_VERSION )
+		FatalError( "mexec: %s has magic %08X version %u; not provisioned for this release",
 			path, st->magic, st->version );
-	}
 	st->generation++;
 	msync( st, sizeof( *st ), MS_SYNC );
 	return( st );
@@ -1840,9 +1872,11 @@ Facts from the unit sources that this code depends on:
 - `MapFile2Mem(path, len, PROT_WRITE)` creates a missing file and
   **resizes an existing file to exactly `len`**. `mexec` therefore checks the
   size first and refuses a mismatch rather than truncating.
-  - It also creates the file itself (`O_EXCL`) before mapping, because a map
-    cache problem on first creation corrupted state in testing. The `map` source
-    is not changed here.
+  - `mexec` never creates its state file: the operator provisions it with
+    `meridianmem --create` (P5), which writes the file with plain `open`/`write`.
+    Letting `Map` create the file at service start also hit a map cache problem
+    on first creation that corrupted state in testing. The `map` source is not
+    changed here.
   - `UpdateMap` reported "Map Segment Not Found" for this mapping, so the code
     calls POSIX `msync` directly.
 - `UDP_Read` NUL-terminates only when fewer bytes than the buffer length
@@ -1859,6 +1893,9 @@ HOME=$PWD make                     # units + meridian; check *.log for errors
 mkdir -p run/pipes run/state && chmod 700 run
 export PIPE_PATH=$PWD/run/pipes/ KILL_PATH=$PWD/run/ ELOG_FILE=$PWD/run/event.log
 export MERIDIAN_STATE=$PWD/run/state
+./bin/mexec                         # before provisioning: exits 1, "provision it with meridianmem --create"
+./bin/meridianmem --create $MERIDIAN_STATE/meridian.state   # operator step, once per host
+./bin/meridianmem $MERIDIAN_STATE/meridian.state            # review the provisioned values
 ./bin/mexec &
 ./bin/medge 127.0.0.1 7300 &
 printf 'ADD 1 5' | nc -u -w2 127.0.0.1 7300     # OK 1 5 gen=1
@@ -1882,6 +1919,7 @@ EXIT 9 3 -> ERR timeout ; mexec exit: 3
 ADD 10 1 while mexec down -> ERR timeout ; later GET -> 15   # lost: EPIPE, no reader
 mexec SIGSTOPped; ADD 21/22/23 -> ERR timeout (x3)
 mexec SIGKILLed; respawned; GET 24 -> OK 24 18 gen=5          # the 3 queued ADDs ran
+missing state file    -> exit 1, "provision it with meridianmem --create"
 wrong-size state file -> exit 1, "refusing to resize", file left at 10 bytes
 foreign state file    -> exit 1, "has magic … not ours"
 SIGTERM -> both exit 0, "stop signal 15" in event.log
@@ -1954,8 +1992,14 @@ WantedBy=default.target
   `sd_notify` calls added (libsystemd, `pkg-config --libs libsystemd`). For
   now a hang is detected only by your external health check (a real `GET`, not
   a ping), which then runs `systemctl --user restart`.
-- Enable each role on each host:
-  `systemctl --user enable --now meridian@mexec meridian@medge`.
+- Provision first (once per host, as the service user):
+  `meridianmem --create ~/.local/state/meridian/meridian.state`. Then enable each
+  role: `systemctl --user enable --now meridian@mexec meridian@medge`.
+- An unprovisioned host makes `mexec` exit 1 at once. After 5 tries in 60 s the
+  unit is `failed`, which is your alert. That is intended: the service must not
+  invent its own state. (`ConditionPathExists=%S/meridian/meridian.state`
+  would instead *skip* the start silently; this tutorial prefers the visible
+  failure.)
 
 Optional clean stop through msg itself, instead of SIGTERM. The `msg` CLI's
 `send` sub-command sends the internal quit (`-3`) message:
@@ -2013,7 +2057,9 @@ Then label it a power-loss test in your records. Writes that were not yet
 - A **process** crash is handled by systemd in place (the queued messages
   resume as above).
 - A **dead host** is handled by moving its roles (Part 1, step 11a). The new
-  host starts with **its own** state, not the dead host's memory or file. If
+  host has the source tree but **no state** until the operator provisions it
+  (`meridianmem --create`, then load a reviewed script, e.g. the last dump kept in
+  your ops records). It never gets the dead host's memory or file. If
   the counts must move, the application has to copy or rebuild them from a
   durable source. Assign roles from your trusted ops records only, never from
   data received over the network.
@@ -2072,17 +2118,18 @@ existing file to the new size and the bytes are then read with the wrong
 layout. Instead, **dump the old state by field name with the old tool, edit
 that dump as a script, and load it with the new tool into a new file.**
 
-The tool is `mstate`, a small mio program in the same unit (`rules.mak`
-installs it as `bin/mstate`). Its output lines are themselves `mstate`
+The tool is `meridianmem`, a small mio program in the same unit (`rules.mak`
+installs it as `bin/meridianmem`). Its output lines are themselves `meridianmem`
 commands, which is what makes the dump a reload script.
 
-`meridian/mstate.c`:
+`meridian/meridianmem.c`:
 
 ```c
-/* mstate: print or set fields of the meridian state file by NAME (mio).
- * Usage: mstate STATE_FILE [ Field.Name [ Value ] ]
- * Output lines are themselves mstate commands, so a dump is a reload script.
- *        mstate --create STATE_FILE   (new file with this layout's defaults)
+/* meridianmem: the meridian unit's <unit>mem tool (see "The <unit>mem
+ * provisioning and restart contract").  Print or set state fields by NAME.
+ * Usage: meridianmem STATE_FILE [ Field.Name [ Value ] ]
+ * Output lines are themselves meridianmem commands, so a dump is a reload script.
+ *        meridianmem --create STATE_FILE   (new file with this layout's defaults)
  * Refuses a file whose size is not sizeof( MerState_t ): never resizes. */
 #include	<meridian.h>
 #include	<map.h>
@@ -2095,7 +2142,7 @@ commands, which is what makes the dump a reload script.
 #include	<unistd.h>
 
 #define	STRUCT	MerState_t
-static	Mitem	mstate_l[ ] = {
+static	Mitem	meridianmem_l[ ] = {
 	ITEM( HEXADECIMAL, u32, magic,         "file magic",            0, 0 ),
 	ITEM( UNSIGNED,    u32, version,       "layout version",        0, 0 ),
 	ITEM( UNSIGNED,    u32, generation,    "starts of mexec",       0, 0 ),
@@ -2132,7 +2179,7 @@ int	main( int ac, char ** av )
 		fprintf( stderr, "usage: %s STATE_FILE [ Field.Name [ Value ] ]\n", av[ 0 ] );
 		return( 2 );
 	}
-	LocalName = "mstate";
+	LocalName = "meridianmem";
 	if( av[ 1 ][ 0 ] != '/' ) {	/* map resolves relative names via MEMORY_PATH */
 		fprintf( stderr, "%s: give an absolute path\n", av[ 0 ] );
 		return( 2 );
@@ -2144,25 +2191,40 @@ int	main( int ac, char ** av )
 	}
 	if( ( st = (MerState_t *)MapFile2Mem( av[ 1 ], sizeof( MerState_t ), PROT_WRITE ) ) == NULL )
 		return( 1 );
-	snprintf( prefix, sizeof( prefix ), "mstate %s", av[ 1 ] );
+	snprintf( prefix, sizeof( prefix ), "meridianmem %s", av[ 1 ] );
 	if( ac == 4 ) {
-		Input_Memory_Item( st, mstate_l, av[ 2 ], av[ 3 ] );
+		Mitem *	i;
+		char *	e;
+		for( i = meridianmem_l; i->name != NULL; i++ )
+			if( strcmp( i->name, av[ 2 ] ) == 0 ) break;
+		if( i->name == NULL ) {
+			fprintf( stderr, "%s: unknown field %s\n", av[ 0 ], av[ 2 ] );
+			return( 2 );
+		}
+		errno = 0;	/* mio stores 0 for bad text: validate first */
+		if( i->type == HEXADECIMAL ) strtoull( av[ 3 ], &e, 16 );
+		else strtoll( av[ 3 ][ 0 ] == '+' ? av[ 3 ] + 1 : av[ 3 ], &e, 10 );
+		if( errno || e == av[ 3 ] || *e != 0 ) {
+			fprintf( stderr, "%s: bad value %s for %s\n", av[ 0 ], av[ 3 ], av[ 2 ] );
+			return( 2 );
+		}
+		Input_Memory_Item( st, meridianmem_l, av[ 2 ], av[ 3 ] );
 		msync( st, sizeof( *st ), MS_SYNC );
 	}
-	Output_Memory_Item( st, mstate_l, ac >= 3 ? av[ 2 ] : NULL, prefix );
+	Output_Memory_Item( st, meridianmem_l, ac >= 3 ? av[ 2 ] : NULL, prefix );
 	UnmapAddress( st, 1 );
 	return( 0 );
 }
 ```
 
 ```text
-$ mstate /home/svc/.local/state/meridian/meridian.state
-mstate /home/svc/.local/state/meridian/meridian.state magic         0x4D455231
-mstate /home/svc/.local/state/meridian/meridian.state version       1
-mstate /home/svc/.local/state/meridian/meridian.state generation    5
-mstate /home/svc/.local/state/meridian/meridian.state last_reqid    23
-mstate /home/svc/.local/state/meridian/meridian.state last_count    +18
-mstate /home/svc/.local/state/meridian/meridian.state count         +18
+$ meridianmem /home/svc/.local/state/meridian/meridian.state
+meridianmem /home/svc/.local/state/meridian/meridian.state magic         0x4D455231
+meridianmem /home/svc/.local/state/meridian/meridian.state version       1
+meridianmem /home/svc/.local/state/meridian/meridian.state generation    5
+meridianmem /home/svc/.local/state/meridian/meridian.state last_reqid    23
+meridianmem /home/svc/.local/state/meridian/meridian.state last_count    +18
+meridianmem /home/svc/.local/state/meridian/meridian.state count         +18
 ```
 
 Things about mio and map, learned from the source and tests, that the
@@ -2170,10 +2232,13 @@ procedure guards against:
 
 - **Use absolute paths.** `Map` resolves a name that does not start with `/`
   or `.` under `$MEMORY_PATH`. In testing, a relative name silently created a
-  second, empty file elsewhere. `mstate` refuses relative paths.
-- **No size or schema check in mio itself.** `mstate` checks the file size and
+  second, empty file elsewhere. `meridianmem` refuses relative paths.
+- **No size or schema check in mio itself.** `meridianmem` checks the file size and
   never creates a file except with `--create` (`O_EXCL`).
-- **`Input_Memory_Item` does not report bad input.** An unknown field name
+- **`Input_Memory_Item` returns nothing and does not report bad input**, so
+  `meridianmem` checks the name against its descriptor list and parses the
+  number itself first, exiting 2 on an unknown field or a bad value. Without
+  that check, an unknown field name
   prints nothing and the exit status is still 0. A non-numeric value stored
   **0**. So check every loaded value afterwards (step 6 below).
 - Generic `*mem` tools in the units (`tpmem`, and `near`'s
@@ -2184,7 +2249,7 @@ procedure guards against:
   itself is not buildable from published sources today (see P2).
 
 Example: release 2 moves `count`, widens `last_count` to `s64`, and adds
-`u32 limit` (default 1000). `MER_VERSION` becomes 2, and its `mstate` lists
+`u32 limit` (default 1000). `MER_VERSION` becomes 2, and its `meridianmem` lists
 the new fields:
 
 ```c
@@ -2197,14 +2262,14 @@ typedef	struct	{
 	u32	last_reqid;
 	u32	limit;			/* new in version 2 */
 }	MerState_t;
-/* mstate_l: ITEM( SIGNED, s64, last_count, … ), ITEM( UNSIGNED, u32, limit, … ) */
+/* meridianmem_l: ITEM( SIGNED, s64, last_count, … ), ITEM( UNSIGNED, u32, limit, … ) */
 ```
 
 The mexec in release 2 must use a **new file name**, for example
 `meridian.v2.state`, so it can never map the version 1 file.
 
 Procedure (`OLD`/`NEW` are the old and new release trees, `S` the state
-directory). This was tested with a version 2 build of `mstate`; the service
+directory). This was tested with a version 2 build of `meridianmem`; the service
 stop/start lines are the systemd commands from P6:
 
 ```sh
@@ -2214,19 +2279,19 @@ systemctl --user stop meridian@medge meridian@mexec
 # 2. keep the old file untouched, with a checksummed copy
 cp -p $S/meridian.state $S/meridian.state.v1.bak && sha256sum $S/meridian.state*
 # 3. dump with the OLD tool
-$OLD/bin/mstate $S/meridian.state > $S/dump.v1
+$OLD/bin/meridianmem $S/meridian.state > $S/dump.v1
 # 4. turn it into a v2 script: new tool, new file; drop magic/version (set by --create)
-awk -v t="$NEW/bin/mstate" -v f="$S/meridian.v2.state" \
+awk -v t="$NEW/bin/meridianmem" -v f="$S/meridian.v2.state" \
     '$3=="magic"||$3=="version"{next} {print t, f, $3, $4}' $S/dump.v1 > $S/load.v2
-echo "$NEW/bin/mstate $S/meridian.v2.state limit 1000" >> $S/load.v2
+echo "$NEW/bin/meridianmem $S/meridian.v2.state limit 1000" >> $S/load.v2
 #    review load.v2 by hand: every new field gets a value, every dropped field
 #    is removed on purpose, every changed meaning gets a converted value
 # 5. create the new file and load it
-$NEW/bin/mstate --create $S/meridian.v2.state
+$NEW/bin/meridianmem --create $S/meridian.v2.state
 bash $S/load.v2 > /dev/null
-# 6. verify each line was really applied (mio does not report errors)
+# 6. verify each line was really applied (re-read every field)
 while read -r tool file name value; do
-	got=$($NEW/bin/mstate "$file" "$name" | awk '{print $4}')
+	got=$($NEW/bin/meridianmem "$file" "$name" | awk '{print $4}')
 	[ "$got" = "$value" ] || echo "MISMATCH $name: want $value got $got"
 done < $S/load.v2
 # 7. switch the release symlink (P8) and start: executor first, then the edge
