@@ -1366,10 +1366,8 @@ with yours.
 - **Source copies are not data copies.** The identical trees (step 8) let any
   node rebuild and run any role; they do not hold the other nodes' live data.
 
-The messaging units (`msg`, `addr`, `near`) are described in this README as
-the layer a design could use for node-to-node coordination, but no public API
-for them is documented here, so this tutorial does not rely on them for
-failover.
+The messaging units (`msg`, `addr`, `near`) do not add failover either: msg
+is host-local FIFOs, and near only moves UDP datagrams (Tutorial part 2, P7).
 
 ### 12. What the application owns vs what base provides
 
@@ -1408,6 +1406,677 @@ blocks; the multi-server behavior above is code and config you own.
 [ ] health check + one-host-at-a-time roll-out + tested rollback
 [ ] spare host verified; role takeover + fencing rehearsed (step 11a)
 ```
+
+---
+
+## Tutorial part 2: near → msg → execution, with restart and redeploy
+
+Part 1 used plain sockets. Part 2 builds the same kind of service on the
+messaging units: a **near** edge takes UDP requests, hands each one to an
+**execution** process through **msg**, and returns the reply over UDP. It also
+covers the restart rule this design assumes: **on start, a process maps its
+shared memory and then resumes with the next message waiting in its msg FIFO.**
+
+The `msg`, `addr` and `near` sources were read for this part. Their public
+repositories (`github.com/smythereen/msg`, `…/addr`, `…/near`) are being
+published. When this was written they were **not** in the catalog yet, so
+`repo add msg` does not work until they are. The starter list
+(`sys atomic far map sem now mio tp tpi`) does not change.
+
+### P1. What was run, and what was not
+
+Run on Linux x86-64 with gcc in a scratch project (results quoted below):
+build and link of `mexec`/`medge`; ADD/GET over UDP; retry dedupe; frame
+limits; bad input; fault injection (`abort`, `exit 3`); respawn with state
+kept; messages queued in the FIFO while the executor was hung (SIGSTOP) and
+then killed (SIGKILL) were processed after respawn; refusing a wrong-size or
+foreign state file. The C sources also pass a C++ syntax check (clang++
+driver) after one cast that is already in the code below.
+
+**Not run:** systemd units, `msg` CLI stop, real power-off reboot, remote
+hosts, the load balancer, the release/rollback commands. They are written to
+the documented behaviour and are marked as untested where they appear.
+
+### P2. Units, and the build gaps you must know about
+
+| Unit | Used for | Build status from the published sources |
+|---|---|---|
+| `addr` | `u32` address `machine.group.program.subtask`; `Numbers_To_Address`, `Name_To_Address` | builds (library + `addr`, `addrmem` tools) |
+| `msg` | `MsgInit`, `MsgSend`, `MsgRead`; per-address FIFO `XXXXXXXX.que` + mapped buffer file `XXXXXXXX.mem` | **library builds**; the `msg` **CLI does not** (needs `miomsg`, see P8) |
+| `near` | `UDP_Open`, `UDP_Read_With_Timeout`, `UDP_Send` (IPv4 only) | **does not build** without `sig.h` from the unpublished `sig` unit; `near`'s own programs also need project SNMP and `miomsg` |
+
+So with only published code today, `libnear.a` cannot be built. For the test
+run here, `libnear.a` was compiled with an **empty test-only `sig.h`** on the
+include path (the UDP routines do not use it). That is a lab workaround, not a
+supported build. Supply the real `sig` unit before production use. If you
+cannot, write the edge with plain sockets as in Part 1 and keep the rest.
+
+`miomsg` is a separate unit (`MioMsgInit`, which registers the `MSGADDR`
+field type with `MioRegisterHandler`). It is not part of these repos, and this
+tutorial's programs do not use it.
+
+None of these units has a `UNIT.deps` file yet, so `repo` cannot work out
+their dependencies. Add the companions explicitly:
+
+```sh
+./repo/repo.sh add sys; ./repo/repo.sh add far; ./repo/repo.sh add map
+./repo/repo.sh add mio; ./repo/repo.sh add now
+# once published (or now, with your own URLs, which writes private.units):
+./repo/repo.sh add addr https://github.com/smythereen/addr.git
+./repo/repo.sh add msg  https://github.com/smythereen/msg.git
+./repo/repo.sh add near https://github.com/smythereen/near.git
+```
+
+### P3. Roles
+
+| Role | Program | Notes |
+|---|---|---|
+| near edge | `medge BIND_IP PORT` | UDP in/out, strict request parsing, msg client |
+| execution + state | `mexec` | owns the mapped state file, serves msg requests |
+| msg "service" | — | **none**: msg is a library. Each receiving process owns its FIFO + buffer file under `$PIPE_PATH` |
+| addr "service" | — | **none** needed here: addresses are numeric (`Numbers_To_Address`), so no `addr.mem` name table is used |
+| balancer | your nginx/HAProxy | in front of the edges (Part 1, step 10) |
+| supervisor | systemd (or init) | one supervisor for every role; respawns on exit |
+
+msg here is **host-local**. It is not a network transport: `MsgSend` writes
+to a FIFO on this machine. Every host runs its own `medge` + `mexec` pair with
+the same addresses. Only the UDP side crosses the network.
+
+### P4. The code
+
+`meridian/meridian.h`:
+
+```c
+/* meridian.h - shared definitions for the meridian tutorial roles */
+#ifndef	MERIDIAN_H
+#define	MERIDIAN_H
+
+#include	<common.h>
+#include	<atomic_32.h>
+#include	<msg.h>
+
+/* msg addresses (addr layout machine.group.program.subtask), numeric so
+ * no addr.mem name table is needed.  msg is host-local here: every host
+ * uses the same numbers for its own local roles. */
+#define	MER_MCH		1
+#define	MER_GRP		1
+#define	MER_EXEC_ADR	Numbers_To_Address( MER_MCH, MER_GRP, 1, 0 )
+#define	MER_EDGE_ADR	Numbers_To_Address( MER_MCH, MER_GRP, 2, 0 )
+
+/* application msg function codes (>= 0; negative codes are msg-internal) */
+#define	MER_F_ADD	1
+#define	MER_F_GET	2
+#define	MER_F_CRASH	90
+#define	MER_F_EXIT	91
+#define	MER_F_REPLY	100
+
+#define	MER_MAX_FRAME	256		/* largest accepted UDP request */
+
+typedef	struct	{			/* request body (edge -> exec) */
+	u32	reqid;
+	s32	value;
+}	MerReq_t;
+
+typedef	struct	{			/* reply body (exec -> edge) */
+	u32	reqid;
+	s32	status;			/* 0 ok, else error code */
+	s32	count;
+	u32	generation;
+}	MerRep_t;
+
+/* persistent state, one mapped file per host, owned by mexec */
+#define	MER_MAGIC	0x4D455231	/* "MER1" */
+#define	MER_VERSION	1
+
+typedef	struct	{
+	u32	magic;
+	u32	version;
+	u32	generation;		/* +1 on every mexec start */
+	u32	last_reqid;		/* last applied ADD (dedupe of a retry) */
+	s32	last_count;
+	atom_32	count;
+}	MerState_t;
+
+#endif
+```
+
+`meridian/mexec.c`. The startup order is the restart rule: map the state, then
+`MsgInit`, then `MsgRead`:
+
+```c
+/* mexec: execution role.  Startup order:
+ *   1. map the persistent state file (never truncate an existing one)
+ *   2. validate magic/version, bump generation
+ *   3. MsgInit: create/attach this role's msg FIFO + buffer file
+ *   4. MsgRead loop: resume with the next message already queued
+ */
+#include	<meridian.h>
+#include	<map.h>
+#include	<stdio.h>
+#include	<stdlib.h>
+#include	<string.h>
+#include	<signal.h>
+#include	<unistd.h>
+#include	<sys/stat.h>
+#include	<fcntl.h>
+#include	<sys/mman.h>
+
+static	volatile sig_atomic_t	stop_flag;
+static	void	on_term( int s ) { stop_flag = s; }
+
+static	MerState_t *	map_state( char * path )
+{
+	struct	stat	sb;
+	MerState_t *	st;
+	int		fresh;
+
+	if( stat( path, &sb ) == 0 ) {
+		if( sb.st_size != (off_t)sizeof( MerState_t ) )
+			FatalError( "mexec: %s is %lld bytes, expected %u; refusing to resize",
+				path, (long long)sb.st_size, (unsigned)sizeof( MerState_t ) );
+		fresh = 0;
+	} else if( errno == ENOENT ) {
+		/* create it ourselves (O_EXCL: never truncate an existing file),
+		 * so map's own stat() sees a real file before it maps it */
+		int fd = open( path, O_RDWR | O_CREAT | O_EXCL, 0600 );
+		if( fd < 0 || ftruncate( fd, sizeof( MerState_t ) ) != 0 )
+			FatalError( "mexec: create %s: %s", path, strerror( errno ) );
+		close( fd );
+		fresh = 1;
+	} else {
+		FatalError( "mexec: stat %s: %s", path, strerror( errno ) );
+		return( NULL );
+	}
+	if( ( st = (MerState_t *)MapFile2Mem( path, sizeof( MerState_t ), PROT_WRITE ) ) == NULL )
+		FatalError( "mexec: cannot map %s", path );
+	if( fresh ) {
+		memset( st, 0, sizeof( *st ) );
+		st->version = MER_VERSION;
+		st->magic = MER_MAGIC;		/* written last: marks it valid */
+		msync( st, sizeof( *st ), MS_SYNC );
+		EventLog( "mexec: created state %s", path );
+	} else if( st->magic != MER_MAGIC || st->version != MER_VERSION ) {
+		FatalError( "mexec: %s has magic %08X version %u; not ours",
+			path, st->magic, st->version );
+	}
+	st->generation++;
+	msync( st, sizeof( *st ), MS_SYNC );
+	return( st );
+}
+
+int	main( int argc, char ** argv )
+{
+	char		path[ 512 ];
+	char *		dir;
+	MerState_t *	st;
+	Msg_t		m, r;
+	MerReq_t	q;
+	MerRep_t	a;
+	s32		f;
+
+	LocalName = "mexec";
+	if( ( dir = getenv( "MERIDIAN_STATE" ) ) == NULL || *dir == 0 )
+		FatalError( "mexec: MERIDIAN_STATE (state directory) not set" );
+	snprintf( path, sizeof( path ), "%s/meridian.state", dir );
+
+	st = map_state( path );				/* 1 + 2 */
+	MsgInit( MER_EXEC_ADR, NULL, NULL );		/* 3 */
+	umask( 077 );	/* msg/far set umask 0 while creating kill scripts */
+	signal( SIGPIPE, SIG_IGN );	/* a dead reader gives EPIPE, not death */
+	signal( SIGTERM, on_term );
+	signal( SIGINT, on_term );
+	EventLog( "mexec: up gen %u count %d", st->generation, S32_Read( &st->count ) );
+
+	while( !stop_flag ) {				/* 4 */
+		if( ( f = MsgRead( &m, 1 ) ) == MSG_TIMEOUT ) continue;
+		if( m.head.length != sizeof( MsgHead_t ) + sizeof( MerReq_t ) ) {
+			EventLog( "mexec: drop function %d length %u", f, m.head.length );
+			continue;
+		}
+		memcpy( &q, m.body.data, sizeof( q ) );
+		memset( &a, 0, sizeof( a ) );
+		a.reqid = q.reqid;
+		switch( f ) {
+		case MER_F_ADD:
+			if( q.reqid != 0 && q.reqid == st->last_reqid ) {
+				a.count = st->last_count;	/* retry: do not apply twice */
+				break;
+			}
+			a.count = S32_Add_Return( q.value, &st->count );
+			st->last_count = a.count;
+			st->last_reqid = q.reqid;
+			break;
+		case MER_F_GET:
+			a.count = S32_Read( &st->count );
+			break;
+		case MER_F_CRASH:
+			EventLog( "mexec: CRASH requested (reqid %u)", q.reqid );
+			abort( );
+		case MER_F_EXIT:
+			EventLog( "mexec: EXIT %d requested (reqid %u)", q.value, q.reqid );
+			exit( q.value );
+		default:
+			a.status = 1;
+			break;
+		}
+		a.generation = st->generation;
+		memset( &r, 0, sizeof( r ) );
+		memcpy( r.body.data, &a, sizeof( a ) );
+		MsgSend( m.head.source, MER_F_REPLY, &r,
+			 sizeof( MsgHead_t ) + sizeof( a ), 0 );
+	}
+	msync( st, sizeof( *st ), MS_SYNC );
+	EventLog( "mexec: stop signal %d count %d", (int)stop_flag, S32_Read( &st->count ) );
+	return( 0 );
+}
+```
+
+`meridian/medge.c`:
+
+```c
+/* medge: near edge role.  UDP request -> msg -> mexec -> msg -> UDP reply.
+ * Usage: medge BIND_IP PORT      (e.g. medge 0.0.0.0 7300)
+ * Request frames (ASCII, one datagram, <= 256 bytes, fixed tokens only):
+ *   ADD <reqid> <value>   GET <reqid>   CRASH <reqid>   EXIT <reqid> <status>
+ * Replies: "OK <reqid> <count> gen=<generation>" or "ERR <reason>".
+ * CRASH/EXIT are refused unless MERIDIAN_FAULTS=1 (lab fault injection).
+ */
+#include	<meridian.h>
+#include	<near.h>
+#include	<stdio.h>
+#include	<stdlib.h>
+#include	<string.h>
+#include	<signal.h>
+#include	<unistd.h>
+#include	<sys/stat.h>
+
+static	volatile sig_atomic_t	stop_flag;
+static	void	on_term( int s ) { stop_flag = s; }
+
+static	int	parse_u32( const char * s, u32 * out )
+{
+	char *		e;
+	unsigned long	v;
+
+	if( s == NULL || *s < '0' || *s > '9' ) return( -1 );
+	errno = 0;
+	v = strtoul( s, &e, 10 );
+	if( errno || *e != 0 || v == 0 || v > 0xFFFFFFFFUL ) return( -1 );
+	*out = (u32)v;
+	return( 0 );
+}
+
+static	int	parse_s32( const char * s, s32 lo, s32 hi, s32 * out )
+{
+	char *	e;
+	long	v;
+
+	if( s == NULL || *s == 0 ) return( -1 );
+	errno = 0;
+	v = strtol( s, &e, 10 );
+	if( errno || *e != 0 || v < lo || v > hi ) return( -1 );
+	*out = (s32)v;
+	return( 0 );
+}
+
+static	void	reply( int fd, char * text )
+{
+	UDP_Send( UDP_Read_IP, UDP_Read_Port, fd, text, (s_t)strlen( text ) );
+}
+
+int	main( int argc, char ** argv )
+{
+	char		frame[ MER_MAX_FRAME + 2 ], out[ 128 ];
+	char *		tok[ 4 ];
+	char *		save;
+	int		fd, n, faults;
+	s_t		len;
+	s32		f, fn;
+	Msg_t		m, r;
+	MerReq_t	q;
+	MerRep_t	a;
+
+	if( argc != 3 ) {
+		fprintf( stderr, "usage: %s BIND_IP PORT\n", argv[ 0 ] );
+		return( 2 );
+	}
+	LocalName = "medge";
+	faults = getenv( "MERIDIAN_FAULTS" ) != NULL &&
+		 strcmp( getenv( "MERIDIAN_FAULTS" ), "1" ) == 0;
+
+	MsgInit( MER_EDGE_ADR, NULL, NULL );	/* our FIFO for replies */
+	umask( 077 );
+	if( ( fd = UDP_Open( argv[ 1 ], argv[ 2 ], NULL, NULL ) ) < 0 )
+		FatalError( "medge: UDP_Open %s:%s failed", argv[ 1 ], argv[ 2 ] );
+	signal( SIGPIPE, SIG_IGN );	/* a dead reader gives EPIPE, not death */
+	signal( SIGTERM, on_term );
+	signal( SIGINT, on_term );
+	EventLog( "medge: listening udp %s:%s fd %d", UDP_Open_IP, UDP_Open_Port, fd );
+
+	while( !stop_flag ) {
+		len = UDP_Read_With_Timeout( fd, frame, MER_MAX_FRAME + 1, 1000 );
+		if( len == -2 ) continue;			/* timeout */
+		if( len < 0 ) FatalError( "medge: UDP read error %s", strerror( errno ) );
+		if( len == 0 ) continue;
+		if( len > MER_MAX_FRAME ) { reply( fd, "ERR frame-too-long\n" ); continue; }
+		frame[ len ] = 0;
+		if( memchr( frame, 0, (size_t)len ) != NULL ) { reply( fd, "ERR nul\n" ); continue; }
+		while( len > 0 && ( frame[ len - 1 ] == '\n' || frame[ len - 1 ] == '\r' ) )
+			frame[ --len ] = 0;
+
+		for( n = 0, save = NULL; n < 4; n++ )
+			if( ( tok[ n ] = strtok_r( n ? NULL : frame, " ", &save ) ) == NULL ) break;
+		if( n == 4 && strtok_r( NULL, " ", &save ) != NULL ) n = 5;
+
+		memset( &q, 0, sizeof( q ) );
+		fn = -1;
+		if( n >= 2 && parse_u32( tok[ 1 ], &q.reqid ) == 0 ) {
+			if( n == 3 && strcmp( tok[ 0 ], "ADD" ) == 0 &&
+			    parse_s32( tok[ 2 ], -1000000, 1000000, &q.value ) == 0 )
+				fn = MER_F_ADD;
+			else if( n == 2 && strcmp( tok[ 0 ], "GET" ) == 0 )
+				fn = MER_F_GET;
+			else if( faults && n == 2 && strcmp( tok[ 0 ], "CRASH" ) == 0 )
+				fn = MER_F_CRASH;
+			else if( faults && n == 3 && strcmp( tok[ 0 ], "EXIT" ) == 0 &&
+				 parse_s32( tok[ 2 ], 1, 125, &q.value ) == 0 )
+				fn = MER_F_EXIT;
+		}
+		if( fn < 0 ) { reply( fd, "ERR bad-request\n" ); continue; }
+
+		memset( &m, 0, sizeof( m ) );
+		memcpy( m.body.data, &q, sizeof( q ) );
+		MsgSend( MER_EXEC_ADR, fn, &m, sizeof( MsgHead_t ) + sizeof( q ), 0 );
+
+		for( ;; ) {				/* bounded wait for our reply */
+			f = MsgRead( &r, 2 );
+			if( f == MSG_TIMEOUT ) { reply( fd, "ERR timeout\n" ); break; }
+			if( f != MER_F_REPLY ||
+			    r.head.length != sizeof( MsgHead_t ) + sizeof( MerRep_t ) ) continue;
+			memcpy( &a, r.body.data, sizeof( a ) );
+			if( a.reqid != q.reqid ) continue;	/* stale reply */
+			if( a.status != 0 ) snprintf( out, sizeof( out ), "ERR status %d\n", a.status );
+			else snprintf( out, sizeof( out ), "OK %u %d gen=%u\n",
+					a.reqid, a.count, a.generation );
+			reply( fd, out );
+			break;
+		}
+	}
+	EventLog( "medge: stop signal %d", (int)stop_flag );
+	return( 0 );
+}
+```
+
+`meridian/makefile` (the program rule passes `LIBRARIES` to make as
+prerequisites, so do **not** put `-Wl,…` linker flags here):
+
+```make
+include		../rules.mak
+CHDRS =		$(HDR)/meridian.h
+LIBRARIES =	-lnear -lmsg -laddr -lmio -lmap -lsem -lfar -lnow -lsys
+include		../targets.mak
+include	.depend
+```
+
+Facts from the unit sources that this code depends on:
+
+- `MsgInit(adr, quit, print)` with a non-zero address creates the FIFO
+  `$PIPE_PATH/XXXXXXXX.que` and opens it read-write **on fd 0**. It maps the
+  2100-slot buffer file `XXXXXXXX.mem` (1024-byte `Msg_t` each). The FIFO
+  carries only 2-byte slot numbers; the message itself sits in the mapped file.
+- `MsgRead(&m, seconds)` returns the function code, or `MSG_TIMEOUT` (`-1`).
+  Negative codes are handled inside msg: `-2` trace, `-3` quit, `-4` stub,
+  `-5` peer. Use codes `>= 0` for your own messages.
+- `MsgSend(adr, func, msg, len, expire)` fills in `source`, `pid` and `sent`.
+  With `expire != 0` a full buffer is a `FatalError`. If no process has the
+  target FIFO open, the write fails with `EPIPE` and the message is dropped.
+  That is why both programs ignore `SIGPIPE`.
+- `FatalError` logs, runs the quit handlers, sleeps 1 s and calls `exit(1)`.
+  That is the fail-fast path systemd then respawns.
+- `MsgInit` calls `CreateKillScript`, which writes `$KILL_PATH/.K<name>` and
+  sets the process **umask to 0**. msg then creates FIFOs and `.mem` files with
+  mode `0666`. The programs reset `umask(077)` right after `MsgInit`. Keep the
+  run directory itself mode `0700` so other users cannot reach the FIFOs.
+- `MapFile2Mem(path, len, PROT_WRITE)` creates a missing file and
+  **resizes an existing file to exactly `len`**. `mexec` therefore checks the
+  size first and refuses a mismatch rather than truncating.
+  - It also creates the file itself (`O_EXCL`) before mapping, because a map
+    cache problem on first creation corrupted state in testing. The `map` source
+    is not changed here.
+  - `UpdateMap` reported "Map Segment Not Found" for this mapping, so the code
+    calls POSIX `msync` directly.
+- `UDP_Read` NUL-terminates only when fewer bytes than the buffer length
+  arrived. `medge` reads `MAX+1` bytes into a `MAX+2` buffer, so a 257-byte
+  frame is detected and rejected.
+- `UDP_Open` sets `SO_REUSEADDR` (and `SO_BROADCAST`). A second `medge` on
+  the same port may therefore bind without an error; do not rely on bind
+  failing to stop duplicates.
+
+### P5. Build and local test
+
+```sh
+HOME=$PWD make                     # units + meridian; check *.log for errors
+mkdir -p run/pipes run/state && chmod 700 run
+export PIPE_PATH=$PWD/run/pipes/ KILL_PATH=$PWD/run/ ELOG_FILE=$PWD/run/event.log
+export MERIDIAN_STATE=$PWD/run/state
+./bin/mexec &
+./bin/medge 127.0.0.1 7300 &
+printf 'ADD 1 5' | nc -u -w2 127.0.0.1 7300     # OK 1 5 gen=1
+printf 'GET 2'   | nc -u -w2 127.0.0.1 7300     # OK 2 5 gen=1
+```
+
+Results from the test run (requests sent from a small Python UDP client):
+
+```text
+ADD 1 5     -> OK 1 5 gen=1
+ADD 1 5 (retry same reqid) -> OK 1 5 gen=1          # not applied twice
+ADD 2 10    -> OK 2 15 gen=1
+256-byte frame -> OK 4 15 gen=1
+257-byte frame -> ERR frame-too-long
+rm -rf /    -> ERR bad-request                      # fixed tokens only, nothing executed
+ADD 5 99999999 -> ERR bad-request                   # value out of range
+CRASH 6 (faults off) -> ERR bad-request
+CRASH 7 (MERIDIAN_FAULTS=1) -> ERR timeout ; mexec exit: SIGABRT
+GET 8 after respawn -> OK 8 15 gen=2                # state kept, generation +1
+EXIT 9 3 -> ERR timeout ; mexec exit: 3
+ADD 10 1 while mexec down -> ERR timeout ; later GET -> 15   # lost: EPIPE, no reader
+mexec SIGSTOPped; ADD 21/22/23 -> ERR timeout (x3)
+mexec SIGKILLed; respawned; GET 24 -> OK 24 18 gen=5          # the 3 queued ADDs ran
+wrong-size state file -> exit 1, "refusing to resize", file left at 10 bytes
+foreign state file    -> exit 1, "has magic … not ours"
+SIGTERM -> both exit 0, "stop signal 15" in event.log
+```
+
+What the queue test shows, precisely:
+
+- Messages **written while the executor still had its FIFO open** (busy or
+  hung) stay in the kernel FIFO, because `medge` keeps its write end open.
+  Their slots stay in the mapped `.mem` file. The respawned executor maps its
+  state, calls `MsgInit`, and its first `MsgRead` continues with those
+  messages.
+- Messages sent while **no** process has the FIFO open are lost (`EPIPE`).
+- Nothing survives a reboot or the edge closing the FIFO: a FIFO is not
+  durable storage. msg also reclaims slots older than 2 s, but only when the
+  buffer is full.
+- The client got timeouts for work that was then done. Retrying with the
+  **same** `reqid` is safe only for the most recent request (`last_reqid`).
+  Full idempotency (a request-ID table, durable queue, transactions) is
+  application design.
+
+### P6. Supervision: one supervisor, every role
+
+Add the roles to `start-role` (still `exec`, so systemd signals the real PID):
+
+```bash
+mexec)	exec "$HOME/bin/mexec" ;;
+medge)	exec "$HOME/bin/medge" 0.0.0.0 7300 ;;
+```
+
+User-level template (`~/.config/systemd/user/meridian@.service`). It extends
+part 1's template; the role-specific environment is set here, and nothing is
+read from the network:
+
+```ini
+[Unit]
+Description=meridian role %i
+Wants=network-online.target
+After=network-online.target local-fs.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+UMask=0077
+StateDirectory=meridian
+Environment=HOME=%h/meridian/current
+Environment=MERIDIAN_STATE=%S/meridian
+Environment=PIPE_PATH=%t/meridian/pipes/
+Environment=KILL_PATH=%t/meridian/
+Environment=ELOG_FILE=%S/meridian/event.log
+ExecStartPre=/usr/bin/mkdir -p -m 0700 %t/meridian/pipes
+ExecStart=%h/meridian/current/bin/start-role %i
+KillSignal=SIGTERM
+TimeoutStopSec=5
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+```
+
+- `%S` is the user state directory (`~/.local/state`) and `%t` the runtime
+  directory (`$XDG_RUNTIME_DIR`). `StateDirectory=meridian` creates
+  `%S/meridian` for the persistent state file.
+- The FIFOs go in `%t`, which is cleared at logout/reboot. This matches the
+  fact that FIFO contents never survive a reboot anyway.
+- `Type=simple`: the programs do not call `sd_notify`, so do **not** use
+  `Type=notify` or `WatchdogSec=` with them. A watchdog would need
+  `sd_notify` calls added (libsystemd, `pkg-config --libs libsystemd`). For
+  now a hang is detected only by your external health check (a real `GET`, not
+  a ping), which then runs `systemctl --user restart`.
+- Enable each role on each host:
+  `systemctl --user enable --now meridian@mexec meridian@medge`.
+
+Optional clean stop through msg itself, instead of SIGTERM. The `msg` CLI's
+`send` sub-command sends the internal quit (`-3`) message:
+
+```ini
+ExecStop=%h/meridian/current/bin/msg send 0x01010100 0 quit
+```
+
+- The address is `mexec`'s (`Numbers_To_Address(1,1,1,0)`); `0` is the
+  expire argument. The command word is matched as a **case-sensitive prefix**
+  (`strncmp`), so `quit` (or `q`) works and `QUIT` does not.
+- On receipt, `MsgInternal` calls the registered quit handler (none here) and
+  exits with status 0. Because this is a systemd-initiated stop, `Restart=always`
+  does not restart it.
+- **Untested here:** the `msg` CLI cannot be built without `miomsg` (it calls
+  `MioMsgInit`). Without it, keep the default SIGTERM stop, which was tested.
+- The quit message is local-FIFO only. Never expose it on the network.
+
+Unit tests of the supervision behaviour you can run on a host (not run here):
+
+```sh
+systemctl --user kill -s SIGKILL meridian@mexec        # respawned after 2 s
+systemctl --user kill -s SIGSTOP meridian@mexec        # hang: NOT respawned by itself
+systemctl --user kill -s SIGCONT meridian@mexec        # queued requests are then served
+for i in 1 2 3 4 5 6; do systemctl --user kill -s SIGKILL meridian@mexec; sleep 3; done
+systemctl --user status meridian@mexec                 # "start-limit-hit" -> failed
+systemctl --user reset-failed meridian@mexec && systemctl --user start meridian@mexec
+systemctl --user stop meridian@mexec                   # stays stopped (deliberate stop)
+```
+
+**Snapshot vs power test.** Restoring a VM snapshot tests nothing about
+restart: no process ever ran on the frozen image. Do a real power-off/boot:
+
+1. Record `GET`.
+2. Cut power (or hard reset).
+3. After boot (lingering enabled), check that both roles are active, that
+   `GET` returns the same count with `gen` + 1, and that `event.log` shows
+   "up gen N".
+
+Then label it a power-loss test in your records. Writes that were not yet
+`msync`ed before the cut can be lost.
+
+### P7. Multi-host: same tree, per-host state
+
+```text
+ clients ──udp/7300──> your LB ──> host1: medge ─msg─> mexec ─> %S/meridian/meridian.state
+                                └─> host2: medge ─msg─> mexec ─> (its own state file)
+```
+
+- Every host has the identical tree (Part 1, steps 8–9) and runs
+  `meridian@medge` + `meridian@mexec`.
+- Each host's count is its own. The mapped state file and the msg FIFOs are
+  local; nothing replicates them, and `mio` inspection of a mapped file
+  only works for processes on that same machine.
+- A **process** crash is handled by systemd in place (the queued messages
+  resume as above).
+- A **dead host** is handled by moving its roles (Part 1, step 11a). The new
+  host starts with **its own** state, not the dead host's memory or file. If
+  the counts must move, the application has to copy or rebuild them from a
+  durable source. Assign roles from your trusted ops records only, never from
+  data received over the network.
+
+### P8. Full-tree releases and rolling redeploy (untested commands)
+
+Deploy the **whole tree**, never a single unit or binary. One host at a time:
+
+```text
+/srv/meridian/releases/<VERSION>/    complete project tree (base + all units + meridian), built
+/srv/meridian/current -> releases/<VERSION>    symlink switched last
+~/.local/state/meridian/             runtime state (separate from any release)
+```
+
+(Here the user-unit paths `%h/meridian/current` become `/srv/meridian/current`;
+an administrator creates `/srv/meridian` once, owned by the service user. The
+service runs without root.)
+
+```sh
+V=2026.11.05-1                                  # your release name
+R=/srv/meridian/releases/$V
+git clone https://github.com/smythereen/base.git "$R" && cd "$R"
+git checkout <recorded-base-commit>
+cp <your-repo>/project/project.repos <your-repo>/project/project.repos.lock <your-repo>/project/private.units .
+HOME=$PWD ./repo/repo.sh fetch
+while read -r u url ver rev; do [ -d "$u/.git" ] && git -C "$u" checkout -q "$rev"; done < project.repos.lock
+HOME=$PWD make cleanup
+HOME=$PWD make 'CFLAGS=-O2 -g -march=x86-64-v2 -fPIC -fcommon -I$(HDR) -Wno-implicit-int -Wno-address-of-packed-member'
+! grep -qE 'error:|\*\*\* |Error [0-9]' *.log
+git rev-parse HEAD; sha256sum project.repos.lock; git -C meridian rev-parse HEAD
+ln -sfn "$R" /srv/meridian/current.new && mv -T /srv/meridian/current.new /srv/meridian/current
+systemctl --user restart meridian@mexec meridian@medge
+printf 'GET 1' | nc -u -w2 127.0.0.1 7300        # must answer OK with the old count
+```
+
+- `mv -T` of a prepared symlink is the atomic switch.
+- Record and compare the base commit, the lock checksum **and your own app
+  revision** on every host.
+- Keep the last N release directories for rollback: point the symlink back
+  and restart.
+- Use the same compiler, `-march` baseline and `SYS_VARIANT` everywhere.
+- Back up your git remotes (full history; `repo fetch` makes full clones) and,
+  separately, the state directory. A release directory is not a backup of the
+  state.
+- A new release that changes `MerState_t` must bump `MER_VERSION` and
+  migrate the file deliberately. The old binary refuses a file it does not
+  recognise, and the new one refuses a wrong-size file; neither truncates it.
+
+### P9. Security limits of this example
+
+- UDP with **no authentication or encryption**: lab or trusted network only.
+  For anything public you need an authenticated protocol of your own design and
+  firewall rules (allow 7300/udp from the balancer only).
+- The edge accepts only fixed tokens with bounded numbers. It never runs a
+  shell, never evaluates input, and copies only fixed-size structs into msg
+  bodies (no pointers cross processes).
+- Fault commands are refused unless `MERIDIAN_FAULTS=1`; never set it in
+  production.
+- Services run as an unprivileged user with `UMask=0077` and private run/state
+  directories; msg's own `0666` file modes are contained by those directories.
+- SSH between hosts uses keys you provisioned yourself, with normal host-key
+  checking. Do not disable it or accept unknown host keys automatically.
+- Nothing here is a performance or availability claim. Measure your own load.
 
 ---
 
@@ -1477,7 +2146,7 @@ interval state.
 
 ---
 
-### Extended messaging stack (`addr` + `msg` + `near`) — conceptual
+### Extended messaging stack (`addr` + `msg` + `near`)
 
 John’s larger real-time servers often add three **extra** units that cooperate
 as a messaging plane. They are **not** on the public starter list
@@ -1485,9 +2154,11 @@ as a messaging plane. They are **not** on the public starter list
 used by default, and **`make` / `repo fetch` will not download them** unless
 **you** supply URLs (for example via `private.units` in your own project).
 
-This README describes their **roles and how they fit architecturally**, from
-local project experience. It does **not** publish private source, secret APIs,
-or fetch endpoints.
+Their sources are being published as public units (`github.com/smythereen/msg`,
+`…/addr`, `…/near`); see **Tutorial part 2** for a working example with the
+real APIs and the current build gaps (`near` needs the unpublished `sig`
+header; the `msg` CLI needs `miomsg`). Until the catalog lists them, add them
+with explicit URLs.
 
 | Unit | Role (architecture) |
 |---|---|
@@ -1544,12 +2215,12 @@ remains an extended/private project choice via your own unit list.
 
 #### Obtaining `msg` / `addr` / `near`
 
-They are **not** returned by `GET /projects/NONE` and are **not** looked up in
-the public catalog used with the published starter. In John’s extended or
-private projects they are ordinary units: list them in `project.repos` and put
-their git URLs in **`private.units`** (or another catalog you run yourself).
-Public base does not document private cloud fetch URLs. If you only clone
-public GitHub starter units, you will not get `msg`/`addr`/`near`.
+They are **not** returned by `GET /projects/NONE` (the starter list is
+unchanged). At the time of writing they were not in the catalog yet either. Add
+them by URL, which records them in **`private.units`**:
+`./repo/repo.sh add msg https://github.com/smythereen/msg.git` (and the same
+for `addr` and `near`). After the catalog lists them, `./repo/repo.sh add msg`
+is enough. See Tutorial part 2 (P2) for what builds today.
 
 ---
 
