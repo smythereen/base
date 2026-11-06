@@ -199,7 +199,9 @@ first. Exercised with `HOME=$PWD make` against the live catalog on Linux x86-64.
 - Project `GET $PROJECT_WORKER_URL/projects/NONE` → plain-text unit names
   (project.repos format). **Not** a JSON name→URL map on disk.
 
-Public catalog today is fixed read-only starter coverage. There is no public
+The project worker's starter list (`GET /projects/NONE`) stays the nine
+core units. The catalog worker also lists the optional messaging units
+`addr`, `msg` and `near` (same JSON shape). There is no public
 create/delete/governance API documented in base.
 
 ---
@@ -1463,9 +1465,9 @@ covers the restart rule this design assumes: **on start, a process maps its
 shared memory and then resumes with the next message waiting in its msg FIFO.**
 
 The `msg`, `addr` and `near` sources were read for this part. Their public
-repositories (`github.com/smythereen/msg`, `…/addr`, `…/near`) are being
-published. When this was written they were **not** in the catalog yet, so
-`repo add msg` does not work until they are. The starter list
+repositories (`github.com/smythereen/msg`, `…/addr`, `…/near`) are published
+and listed in the catalog worker, so `./repo/repo.sh add msg` (and `addr` /
+`near`) resolves without a private URL. The starter list
 (`sys atomic far map sem now mio tp tpi`) does not change.
 
 ### P1. What was run, and what was not
@@ -1506,10 +1508,9 @@ their dependencies. Add the companions explicitly:
 ```sh
 ./repo/repo.sh add sys; ./repo/repo.sh add far; ./repo/repo.sh add map
 ./repo/repo.sh add mio; ./repo/repo.sh add now
-# once published (or now, with your own URLs, which writes private.units):
-./repo/repo.sh add addr https://github.com/smythereen/addr.git
-./repo/repo.sh add msg  https://github.com/smythereen/msg.git
-./repo/repo.sh add near https://github.com/smythereen/near.git
+./repo/repo.sh add addr
+./repo/repo.sh add msg
+./repo/repo.sh add near
 ```
 
 ### P3. Roles
@@ -2414,15 +2415,15 @@ interval state.
 
 John’s larger real-time servers often add three **extra** units that cooperate
 as a messaging plane. They are **not** on the public starter list
-(`sys atomic far map sem now mio tp tpi`), **not** in the public catalog worker
-used by default, and **`make` / `repo fetch` will not download them** unless
-**you** supply URLs (for example via `private.units` in your own project).
+(`sys atomic far map sem now mio tp tpi`). They **are** in the public catalog
+worker, so `./repo/repo.sh add msg` (and `addr` / `near`) resolves their URLs
+without `private.units`. They are still opt-in: a plain starter project does
+not fetch them until you add them.
 
-Their sources are being published as public units (`github.com/smythereen/msg`,
+Their sources are published as public units (`github.com/smythereen/msg`,
 `…/addr`, `…/near`); see **Tutorial part 2** for a working example with the
 real APIs and the current build gaps (`near` needs the unpublished `sig`
-header; the `msg` CLI needs `miomsg`). Until the catalog lists them, add them
-with explicit URLs.
+header; the `msg` CLI needs `miomsg`).
 
 | Unit | Role (architecture) |
 |---|---|
@@ -2480,11 +2481,10 @@ remains an extended/private project choice via your own unit list.
 #### Obtaining `msg` / `addr` / `near`
 
 They are **not** returned by `GET /projects/NONE` (the starter list is
-unchanged). At the time of writing they were not in the catalog yet either. Add
-them by URL, which records them in **`private.units`**:
-`./repo/repo.sh add msg https://github.com/smythereen/msg.git` (and the same
-for `addr` and `near`). After the catalog lists them, `./repo/repo.sh add msg`
-is enough. See Tutorial part 2 (P2) for what builds today.
+unchanged). They are in the catalog, so `./repo/repo.sh add msg` (and the same
+for `addr` and `near`) is enough. Pass an explicit URL only when you need a
+private fork or a non-catalog location (that writes **`private.units`**). See
+Tutorial part 2 (P2) for what builds today.
 
 ---
 
@@ -2493,9 +2493,9 @@ is enough. See Tutorial part 2 (P2) for what builds today.
 1. **Always (public):** `base` → fetch `sys`+`atomic`; add `far` for I/O waits.
 2. **Shared live state:** `map` (+ `sem` if you need those locks) + `mio`/`now`
    for operator-visible fields; `tp`/`tpi` if you want interval rates.
-3. **Multi-program messaging on your private tree:** add `addr`+`msg`, and
-   `near` when hosts must talk—via **your** `private.units`, not the public
-   starter catalog.
+3. **Multi-program messaging (opt-in):** add `addr`+`msg`, and `near` when
+   hosts must talk—from the public catalog (`repo add`), or via **your**
+   `private.units` for a private fork. Not part of the starter list.
 4. **Still your job:** protocol, accept-loop policy, batching, backpressure,
    systemd/watchdogs, multi-host failover, durable storage, metrics/alerting.
 
