@@ -359,6 +359,616 @@ bumps when you want interval rate accounting around those points you define.
 
 ---
 
+## Tutorial: one project from an empty directory to a multi-server deployment
+
+This is a complete worked example you can follow line by line. It builds a
+small **UDP echo + counter server** (`echoctr`) on the public `sys`, `far` and
+`now` units, runs it locally, runs a second local instance, then ships the
+**same compiled binary** to several hosts behind a load balancer **you** own.
+
+Every C call below is either a public unit API that was read in the unit
+sources (`File_Test_For_Read_Data`, `Micro_Now`, `EventLog`, `Trace`,
+`LocalName`, `TraceLevel`) or a plain POSIX/libc call (`socket`, `bind`,
+`recvfrom`, `sendto`, `signal`). Every make/repo command was run against the
+live catalog on Linux x86-64 while writing this section. Hosts are the
+placeholders `host1`, `host2`; the deploy user is the placeholder `svc`.
+Nothing here is a hosted or purchased service, and nothing gives you automatic
+high availability: what the application must own is listed in step 12.
+
+### 0. What you need on the build host and on each server
+
+| Where | Needs |
+|---|---|
+| Build host | Linux x86-64, `bash`, **GNU make**, `gcc`, `ar`, `ranlib`, `git`, `curl`, `tsort`, `awk`, `sed`; HTTPS access to GitHub and to the catalog worker |
+| Each server | Linux x86-64 with glibc (the program links the unit `.a` libraries statically; `ldd` shows only libc), `systemd` with user services (or just a shell, see 9b), an open UDP port |
+| Probing | `nc` (netcat with `-u`) **or** `python3`; both forms are shown |
+
+The servers do **not** need make, gcc, git or the unit sources. They run the
+artifact you built once.
+
+### 1. Bootstrap the project from an empty directory
+
+```sh
+mkdir -p ~/src && cd ~/src                    # any empty place you like
+git clone https://github.com/smythereen/base.git echoproj
+cd echoproj
+export PROJECT_WORKER_URL=https://unit-catalog.dejavu-archive.workers.dev
+export UNITS_CATALOG_URL=https://unit-catalog.dejavu-archive.workers.dev
+export CC=gcc CXX=g++
+```
+
+**The project directory is `HOME` for builds.** `rules.mak` finds `bin`,
+`cmn`, `lib`, `run` through `~`, so either use a dedicated login whose home is
+the project, or prefix every make with `HOME=$PWD` as this tutorial does. For
+an interactive shell, copy the profile template and source it:
+
+```sh
+cp env.example .project_profile               # edit if needed; it holds no secrets
+HOME=$PWD bash -c 'source ./.project_profile; env | grep -E "^(FILE|DATA|PIPE|MEMORY)_PATH|^ELOG_FILE|^UNITS"'
+```
+
+`env.example` sets `PATH=$HOME/bin:…`, `ELOG_FILE=$HOME/run/event.log`,
+`FILE_PATH`/`DATA_PATH`/`MEMORY_PATH=$HOME/run/`, `PIPE_PATH=$HOME/run/pipes/`,
+and reads `UNITS` from `units.mak`.
+
+### 2. Choose units: `project.repos`
+
+`echoctr` calls `far` (read wait), `now` (`Micro_Now`) and `sys`
+(`EventLog`, `Trace`). Add only the two it asks for; `repo` resolves the rest:
+
+```sh
+./repo/repo.sh add far
+./repo/repo.sh add now
+cat project.repos
+```
+
+Result (written by the tool, do not hand-edit the `via=` lines):
+
+```text
+far
+now
+atomic	via=sys
+sys	via=far,now
+```
+
+`project.repos.lock` now records `<unit> <url> <version> <git-rev>` for each
+clone, for example `sys https://github.com/smythereen/sys.git v0.2.0 a2c40f7…`.
+The tools also print `FULL REBUILD NEEDED` and leave `.rebuild-needed`; the
+next plain `make` does that rebuild and clears it.
+
+(Alternative: a plain `HOME=$PWD make` in a project with no `project.repos`
+takes the whole starter list `sys atomic far map sem now mio tp tpi`. That
+works too; this tutorial keeps the set minimal.)
+
+### 3. Add the application unit `echoctr`
+
+```sh
+mkdir -p echoctr
+cat > echoctr/makefile <<'EOF'
+include		../rules.mak
+CHDRS =
+LIBRARIES =	-lfar	-lnow	-lsys
+include		../targets.mak
+include	.depend
+EOF
+printf '%s\n' 'base 1' 'require far' 'require now' 'require sys' > echoctr/UNIT.deps
+```
+
+- `rules.mak` turns every `.c` containing `main(` into a program and installs
+  it into `~/bin` during `make product`; other `.c` files would go into
+  `~/lib/libechoctr.a`.
+- `LIBRARIES` must name **every** library you call, in dependency order:
+  `far` needs `sys`, and `now`'s own `LIBRARIES` is empty, so the caller links
+  `-lnow` and `-lsys` itself (same for `mio`, which needs `-lnow -lsys` from
+  the caller).
+- `UNIT.deps` is what `repo` reads to order and fetch; the makefile is what
+  links. Keep them consistent.
+- `echoctr` stays a **local** unit: `repo status` reports it as
+  `NOT IN THE REPO LIST`, which is expected. When it has its own git remote,
+  `./repo/repo.sh add echoctr <url>` records it in `private.units` instead.
+
+Now the server, `echoctr/echoctr.c`:
+
+```c
+/* echoctr: UDP echo + counter server built on public sys/far/now.
+ * Usage: echoctr SERVER_ID PORT
+ * Request "ping"  -> "pong <id> <count>"
+ * Request "stats" -> "id=<id> port=<port> count=<n> up_us=<us>"
+ * Anything else   -> echoed back unchanged.
+ */
+#include	<common.h>
+#include	<far.h>
+#include	<now.h>
+#include	<stdio.h>
+#include	<stdlib.h>
+#include	<string.h>
+#include	<signal.h>
+#include	<unistd.h>
+#include	<sys/socket.h>
+#include	<netinet/in.h>
+
+static volatile sig_atomic_t	stop_flag;
+
+static void	on_signal( int sig )
+{
+	stop_flag = sig;
+}
+
+int	main( int argc, char ** argv )
+{
+	struct sockaddr_in	me, peer;
+	socklen_t		plen;
+	char			buf[ 512 ], out[ 600 ];
+	u64			count = 0, started;
+	ssize_t			n;
+	int			fd, port, len, one = 1;
+	char *			id;
+
+	if( argc != 3 || ( port = atoi( argv[ 2 ] ) ) <= 0 || port > 65535 ) {
+		fprintf( stderr, "usage: %s SERVER_ID PORT\n", argv[ 0 ] );
+		return( 2 );
+	}
+	id = argv[ 1 ];
+	LocalName = id;
+	if( getenv( "ECHOCTR_TRACE" ) != NULL )
+		TraceLevel = (u32)strtoul( getenv( "ECHOCTR_TRACE" ), NULL, 0 );
+
+	signal( SIGTERM, on_signal );
+	signal( SIGINT, on_signal );
+
+	if( ( fd = socket( AF_INET, SOCK_DGRAM, 0 ) ) < 0 ) {
+		perror( "socket" );
+		return( 1 );
+	}
+	setsockopt( fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof( one ) );
+	memset( &me, 0, sizeof( me ) );
+	me.sin_family = AF_INET;
+	me.sin_addr.s_addr = htonl( INADDR_ANY );
+	me.sin_port = htons( (u16)port );
+	if( bind( fd, (struct sockaddr *)&me, sizeof( me ) ) < 0 ) {
+		perror( "bind" );
+		return( 1 );
+	}
+
+	started = Micro_Now( );
+	EventLog( "echoctr %s start port %d pid %d", id, port, (int)getpid( ) );
+	Trace( 0, "echoctr %s listening on udp/%d\n", id, port );
+
+	while( !stop_flag ) {
+		/* far: wait up to 1000 ms so SIGTERM is noticed promptly */
+		if( File_Test_For_Read_Data( fd, 1000 ) != fd ) continue;
+		plen = sizeof( peer );
+		n = recvfrom( fd, buf, sizeof( buf ) - 1, 0,
+			      (struct sockaddr *)&peer, &plen );
+		if( n < 0 ) continue;
+		buf[ n ] = '\0';
+		while( n > 0 && ( buf[ n - 1 ] == '\n' || buf[ n - 1 ] == '\r' ) )
+			buf[ --n ] = '\0';
+		count++;
+		if( strcmp( buf, "ping" ) == 0 )
+			len = snprintf( out, sizeof( out ), "pong %s %llu\n",
+					id, (unsigned long long)count );
+		else if( strcmp( buf, "stats" ) == 0 )
+			len = snprintf( out, sizeof( out ),
+					"id=%s port=%d count=%llu up_us=%llu\n",
+					id, port, (unsigned long long)count,
+					(unsigned long long)( Micro_Now( ) - started ) );
+		else
+			len = snprintf( out, sizeof( out ), "%s\n", buf );
+		Trace( SYS_TRC_LVL, "req %llu: %s\n", (unsigned long long)count, buf );
+		sendto( fd, out, (size_t)len, 0, (struct sockaddr *)&peer, plen );
+	}
+
+	EventLog( "echoctr %s stop signal %d count %llu",
+		  id, (int)stop_flag, (unsigned long long)count );
+	close( fd );
+	return( 0 );
+}
+```
+
+What each public call does here (from the unit sources):
+
+| Call | Unit | Behavior relied on |
+|---|---|---|
+| `File_Test_For_Read_Data( fd, 1000 )` | far (`farsel.c`) | `select` for read; timeout in **milliseconds** (`<0` forever, `0` poll); returns `fd` when readable, `-2` on timeout, `-1` on error (EINTR is retried inside) |
+| `Micro_Now( )` | now | `u64` microseconds; used for uptime |
+| `EventLog( fmt, … )` | sys (`eventlog.c`) | appends a stamped line to `$ELOG_FILE`, or `./event.log` in the current directory when `ELOG_FILE` is unset |
+| `Trace( level, … )` / `TraceLevel` / `LocalName` | sys (`common.h`, `sysprt.c`) | level `0` always prints to stderr; `SYS_TRC_LVL` (`0x80000000`) prints only when that bit is set |
+
+Networking is plain POSIX on purpose: `far`'s `Listen4Host` is a TCP
+accept loop and `InitUDP2Host` *connects* a UDP socket to one peer, so neither
+is a UDP server bind. Use the unit APIs where they fit and libc where they
+don't—never an invented wrapper.
+
+### 4. Build: `make`, `units.mak`, restarts, logs
+
+```sh
+HOME=$PWD make
+cat units.mak
+ls bin/echoctr
+grep -nE 'error:|\*\*\* |Error [0-9]' header.log library.log product.log || echo "no build errors"
+```
+
+What that one `make` did:
+
+1. `project.repos` is newer than the lock (or the lock is missing) →
+   `repo fetch --no-update` clones anything missing and rewrites the lock.
+2. `units.mak` is regenerated from the unit directories that have a makefile,
+   in dependency order. It is an included makefile, so **GNU make restarts
+   itself** and uses the new list in the same run. Expected content:
+
+   ```text
+   UNITS := repo atomic sys now far echoctr
+   ```
+
+   `echoctr` is included because it is a directory with a makefile; its
+   `UNIT.deps` places it after `far`. If make prints
+   `UNITS changed, run: source ~/.bash_profile`, re-source your profile so
+   the shell's `UNITS` matches.
+3. No `.built` yet (or `.rebuild-needed` newer) → **full rebuild**:
+   `cleanup`, then `header` (headers → `~/cmn`, `atomic` first), `library`
+   (`~/lib/lib*.a`), `product` (`~/bin`). On success it writes `.built` and
+   runs `repo rebuilt`.
+
+The phases keep going after a failing unit and make exits 0, so **always
+grep the logs**. The `warning: overriding recipe for target '.depend'` lines
+are expected with the standard unit makefile layout.
+
+`units.mak` is only regenerated when the lock is newer. If you add a new local
+unit directory **after** the first build, force it with:
+
+```sh
+touch project.repos && HOME=$PWD make         # re-checks the list, rewrites lock + units.mak
+```
+
+### 5. First local server: start and probe
+
+```sh
+export ELOG_FILE=$PWD/run/event.log
+./bin/echoctr node-a 7101 &
+```
+
+Probe it (pick one client):
+
+```sh
+# netcat
+printf 'ping'  | nc -u -w1 127.0.0.1 7101
+printf 'stats' | nc -u -w1 127.0.0.1 7101
+
+# or python3 (no netcat needed)
+udpq() { python3 -c 'import socket,sys;s=socket.socket(2,2);s.settimeout(2);s.sendto(sys.argv[3].encode(),(sys.argv[1],int(sys.argv[2])));print(s.recv(600).decode(),end="")' "$@"; }
+udpq 127.0.0.1 7101 ping
+udpq 127.0.0.1 7101 hello
+udpq 127.0.0.1 7101 stats
+```
+
+Observed output:
+
+```text
+pong node-a 1
+hello
+id=node-a port=7101 count=3 up_us=1052914
+```
+
+stderr shows the level-0 trace line, e.g.
+`26-11-05 22:11:50.057266> echoctr node-a listening on udp/7101`, and
+`run/event.log` gets
+`… (node-a) echoctr node-a start port 7101 pid …`.
+
+Turn on the request trace bit without rebuilding:
+
+```sh
+ECHOCTR_TRACE=0x80000000 ./bin/echoctr node-t 7103 &   # prints "req N: ..." per request
+```
+
+### 6. A second instance on the same machine
+
+The same binary, a different server ID and port:
+
+```sh
+./bin/echoctr node-b 7102 &
+udpq 127.0.0.1 7102 ping          # -> pong node-b 1
+udpq 127.0.0.1 7101 stats         # node-a's count is unaffected
+```
+
+Each process has its **own** counter in its own memory. Two instances on one
+port fail with `bind: Address already in use`. Stop gracefully:
+
+```sh
+kill -TERM %1 %2                   # or kill -TERM <pid>
+tail -n 4 run/event.log            # "... stop signal 15 count N"
+```
+
+The loop wakes at least once a second (the 1000 ms `far` wait), sees the flag
+set by the signal handler, logs, closes the socket and exits 0.
+
+> If you later want instances on **one host** to share a counter, the public
+> path is a `map`-ed file with `S32_*` atomics (and `sem` if you need a lock).
+> That mapping is a local file mmap: it is **not** shared across machines.
+> Two hosts each have their own copy; nothing in base replicates it.
+
+### 7. Development loop vs production build
+
+| | Development | Production |
+|---|---|---|
+| Flags | `rules.mak` default: `-g -O0 -march=native -fPIC -fcommon …` | same flags with `-O2` and a **portable** `-march` (see below) |
+| Rebuild | `HOME=$PWD make -C echoctr` (just your unit) or plain `make` (incremental) | clean: `make cleanup && make` from a recorded commit + lock |
+| Restart | `kill -TERM` the process, re-run `./bin/echoctr …` | build **once**, copy the artifact, restart service units one host at a time |
+| Units | newest revisions via `repo update` while you work | exactly the revisions in the saved `project.repos.lock` |
+
+**`-march=native` is a deployment trap**: a binary built on a newer CPU can
+die with `SIGILL` on an older server. `CFLAGS` given on the master make
+command line propagates to every unit (checked: no `march=native` left in the
+logs), so build the release like this:
+
+```sh
+HOME=$PWD make cleanup
+HOME=$PWD make 'CFLAGS=-O2 -g -march=x86-64-v2 -fPIC -fcommon -I$(HDR) -Wno-implicit-int -Wno-address-of-packed-member'
+grep -nE 'error:|\*\*\* |Error [0-9]' *.log || echo "no build errors"
+ldd bin/echoctr                    # expect only linux-vdso, libc, ld-linux
+```
+
+Keep `-I$(HDR)` (single quotes so make, not the shell, expands it). Pick the
+`-march` level that all your servers support.
+
+### 8. Make a reproducible release artifact
+
+base `.gitignore` ignores `project.repos`, `project.repos.lock`, `units.mak`
+and build state, so **keep your project in its own git repository** (your
+`echoctr` unit plus a copy of the list and lock). Record what produced the
+binary and ship that record with it:
+
+```sh
+REL=echoctr-$(git -C echoctr rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)
+mkdir -p tmp/$REL/bin
+cp -p bin/echoctr tmp/$REL/bin/
+cp -p project.repos project.repos.lock tmp/$REL/
+( cd tmp/$REL && sha256sum bin/echoctr > SHA256SUMS )
+tar -C tmp -czf tmp/$REL.tar.gz $REL
+sha256sum tmp/$REL.tar.gz
+```
+
+To rebuild the **same** unit revisions later on another build host, clone base,
+put back `project.repos` and the lock, fetch, then pin each unit to the
+recorded rev:
+
+```sh
+HOME=$PWD ./repo/repo.sh fetch
+while read -r unit url ver rev; do
+	[ -d "$unit/.git" ] && git -C "$unit" checkout -q "$rev"
+done < project.repos.lock
+HOME=$PWD ./repo/repo.sh status
+```
+
+(`repo fetch`/`update` otherwise move to the newest version.) The safest rule
+is simpler: **build once, deploy that tarball everywhere, and compare
+`sha256sum` on every host.**
+
+### 9. Install on one server
+
+Copy and unpack under the service user's own home (no root, nothing global):
+
+```sh
+REL=echoctr-abc1234                # your release name from step 8
+scp tmp/$REL.tar.gz svc@host1:
+ssh svc@host1 "mkdir -p ~/echoctr/releases ~/echoctr/run &&
+  tar -C ~/echoctr/releases -xzf ~/$REL.tar.gz &&
+  cd ~/echoctr/releases/$REL && sha256sum -c SHA256SUMS &&
+  ln -sfn ~/echoctr/releases/$REL ~/echoctr/current"
+```
+
+#### 9a. User-owned systemd template unit
+
+One template, one small environment file per instance (explicit server ID and
+port; nothing hidden):
+
+```sh
+ssh svc@host1 'mkdir -p ~/.config/systemd/user ~/.config/echoctr'
+ssh svc@host1 'cat > ~/.config/systemd/user/echoctr@.service' <<'EOF'
+[Unit]
+Description=echoctr UDP echo/counter instance %i
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/echoctr/%i.env
+Environment=ELOG_FILE=%h/echoctr/run/event.log
+WorkingDirectory=%h/echoctr/run
+ExecStart=%h/echoctr/current/bin/echoctr ${SERVER_ID} ${PORT}
+KillSignal=SIGTERM
+TimeoutStopSec=5
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+ssh svc@host1 'printf "SERVER_ID=host1-a\nPORT=7101\n" > ~/.config/echoctr/a.env'
+ssh svc@host1 'systemctl --user daemon-reload &&
+  systemctl --user enable --now echoctr@a &&
+  systemctl --user status --no-pager echoctr@a'
+```
+
+User services stop at logout unless lingering is enabled for that account. That
+is a one-time admin action on each host: `sudo loginctl enable-linger svc`.
+
+Day-to-day control:
+
+```sh
+systemctl --user stop    echoctr@a     # SIGTERM -> "stop signal 15" in event.log
+systemctl --user start   echoctr@a
+systemctl --user restart echoctr@a
+journalctl --user -u echoctr@a -n 20   # stderr trace lines
+tail -n 20 ~/echoctr/run/event.log     # EventLog lines
+```
+
+A second instance on the same host is just another env file:
+`printf "SERVER_ID=host1-b\nPORT=7102\n" > ~/.config/echoctr/b.env` then
+`systemctl --user enable --now echoctr@b`.
+
+#### 9b. Foreground alternative (no systemd)
+
+```sh
+cd ~/echoctr/run
+ELOG_FILE=$PWD/event.log exec ~/echoctr/current/bin/echoctr host1-a 7101
+```
+
+Run it under `tmux`/`screen` or your own supervisor. Without a supervisor
+nothing restarts it after a crash or reboot—that is your decision to make.
+
+### 10. Multi-server topology
+
+```text
+             clients
+                │  udp/7100
+                ▼
+     ┌─────────────────────┐   load balancer: YOUR process, YOUR config
+     │  lb host (nginx)     │   (not provided by base or any unit)
+     └──────┬────────┬─────┘
+            │        │ udp/7101
+            ▼        ▼
+       host1:7101  host2:7101     same tarball, same sha256,
+       echoctr@a   echoctr@a      different SERVER_ID per node
+```
+
+Repeat step 9 on `host2` with `SERVER_ID=host2-a`. Then verify each node
+directly before putting a balancer in front:
+
+```sh
+for h in host1 host2; do
+	ssh svc@$h 'sha256sum ~/echoctr/current/bin/echoctr; readlink ~/echoctr/current'
+	printf 'ping' | nc -u -w1 $h 7101       # or: udpq $h 7101 ping
+done
+```
+
+The `sha256sum` values must be identical; the `pong` replies must name
+different server IDs.
+
+Example balancer, **open-source nginx `stream` module** (one option; HAProxy,
+LVS/IPVS, DNS or client-side lists also work). You install, run and pay for
+it yourself—nothing here is deployed for you:
+
+```nginx
+# /etc/nginx/nginx.conf (top level, outside the http{} block)
+stream {
+    upstream echoctr_udp {
+        server host1:7101 max_fails=3 fail_timeout=10s;
+        server host2:7101 max_fails=3 fail_timeout=10s;
+    }
+    server {
+        listen 7100 udp;
+        proxy_pass echoctr_udp;
+        proxy_responses 1;     # one reply datagram per request
+        proxy_timeout 2s;
+    }
+}
+```
+
+`nginx -t && nginx -s reload`, then `printf 'ping' | nc -u -w1 lbhost 7100`
+several times: replies alternate between `host1-a` and `host2-a`.
+Open-source nginx only marks a node bad **passively** (after failed
+requests); it does not actively probe. Active checks are your script (below)
+or another balancer.
+
+Counters are **per process**: each node counts only what it received. A
+"cluster total" means summing `stats` from every node yourself. The `map`
+module cannot fix that—an mmapped file lives on one machine.
+
+### 11. Health monitoring and safe rolling deployment
+
+A health probe that any monitor or cron job can call (exit 0 = healthy):
+
+```sh
+#!/usr/bin/env bash
+# echoctr-check HOST PORT  -> prints the stats line, exits non-zero if no reply
+set -u
+reply=$(printf 'stats' | nc -u -w1 "$1" "$2") || true
+[ -n "$reply" ] && { echo "$1:$2 $reply"; exit 0; }
+echo "$1:$2 NO REPLY" >&2; exit 1
+```
+
+Rolling deployment, one host at a time, stopping at the first failure. Draining
+a node from the balancer is shown as a comment because how you do it depends on
+your balancer (edit the upstream and reload, mark it `down`, etc.):
+
+```sh
+#!/usr/bin/env bash
+# roll-out REL host1 host2 ...   (REL = release name from step 8)
+set -euo pipefail
+REL=$1; shift
+for h in "$@"; do
+	echo "== $h"
+	# 1. drain: remove $h from the LB upstream and reload the LB (your step)
+	scp "tmp/$REL.tar.gz" "svc@$h:"
+	ssh "svc@$h" "set -e
+		mkdir -p ~/echoctr/releases
+		tar -C ~/echoctr/releases -xzf ~/$REL.tar.gz
+		cd ~/echoctr/releases/$REL && sha256sum -c SHA256SUMS
+		ln -sfn ~/echoctr/releases/$REL ~/echoctr/current
+		systemctl --user restart echoctr@a
+		sleep 1
+		systemctl --user is-active echoctr@a"
+	./echoctr-check "$h" 7101 || { echo "== $h unhealthy: stop and roll back"; exit 1; }
+	# 2. undrain: put $h back in the LB upstream and reload (your step)
+done
+echo "== all hosts on $REL"
+```
+
+Rollback is the same switch pointed at the previous release directory:
+
+```sh
+ssh svc@host1 'ln -sfn ~/echoctr/releases/<previous> ~/echoctr/current &&
+  systemctl --user restart echoctr@a'
+```
+
+Facts that matter during a roll:
+
+- `restart` sends SIGTERM; `echoctr` exits within about one second (its `far`
+  wait timeout). Datagrams arriving during that gap are **lost**—UDP has no
+  retry unless your client adds one.
+- The counter restarts at 0 on every restart. If it must survive, persist it
+  (a `map`ed file on that host, or your own storage) — that is application
+  design.
+- Mixed versions run side by side during a roll. Keep the request/response
+  format backward compatible across one release, or drain completely first.
+- Keep at least one healthy node in the balancer at all times; roll one node,
+  check it, then the next.
+
+### 12. What the application owns vs what base provides
+
+| Concern | base + public units | Your application / operations |
+|---|---|---|
+| Fetching and building units | `repo`, `project.repos`, lock, `units.mak`, make phases | keeping list + lock in **your** repo; choosing when to update |
+| Socket/file helpers, waits | `far` (`File_Test_For_Read_Data`, `Listen4Host`, …) | protocol, framing, auth, rate limits, backpressure |
+| Time, logs, trace | `now`, `EventLog`, `Trace`/`TraceLevel` | log rotation and shipping, alerting |
+| Shared state on **one** host | `map` (+`sem`, `atomic`) | anything shared **between** hosts: replication, consensus, a database |
+| Process lifecycle | — | systemd/supervisor units, restart policy, lingering, resource limits |
+| Load balancing | — | balancer software, its config, its own redundancy (one LB is a single point of failure) |
+| Health and failover | — | probes, removing dead nodes, paging a human |
+| Disks, backups, capacity | — | disk-full handling for `event.log`/trace files, backups, monitoring |
+| Network | — | firewalls, port allocation, DNS, TLS/auth if needed |
+| Deployment | — | artifact build, checksum, rolling procedure, rollback |
+
+There is **no automatic HA, no clustering, no service discovery and no hosted
+offering** in base or the public units. They give you fast, small building
+blocks; the multi-server behavior above is code and config you own.
+
+### 13. Tutorial checklist
+
+```text
+[ ] base cloned; PROJECT_WORKER_URL / UNITS_CATALOG_URL / CC exported
+[ ] repo add far; repo add now          -> project.repos + lock
+[ ] echoctr/{makefile,UNIT.deps,echoctr.c}
+[ ] HOME=$PWD make; units.mak lists echoctr; logs have no errors
+[ ] local ping/stats on two ports; SIGTERM logged in run/event.log
+[ ] release build with portable -march; tarball + SHA256SUMS + lock
+[ ] systemd user template per host, explicit SERVER_ID/PORT, linger enabled
+[ ] each node probed directly; identical sha256 on every host
+[ ] LB config you own; alternating replies through the LB
+[ ] health check + one-host-at-a-time roll-out + tested rollback
+```
+
+---
 
 ## How the units work together
 
