@@ -13,7 +13,9 @@ This *is* the base. Every other unit repository requires this base first.
 
 ## License
 
-Unlicense (public domain). See `LICENSE` and `LICENSE.NOTE`.
+The original files are offered under `Apache-2.0 OR GPL-2.0-or-later`; see `LICENSE` and `LICENSES/`.
+
+Third-party-derived files retain their own licenses and copyright notices.
 
 ## Local bootstrap
 

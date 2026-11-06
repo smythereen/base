@@ -212,8 +212,8 @@ Do not commit build output: `*.o *.a *.d *.so .depend core.* *.tmp *.log` and th
   line. You may use a unit under **either** licence. Use Apache-2.0 to put it in any project, including a
   closed-source one. The GPL alternative lets the units be built into the CAYE kernel.
 - **c-saw** (the CAYE compiler) and the loader: `GPL-2.0-or-later` only.
-- **Each unit has a `LICENSE` file** that explains this and lists exceptions. The licence texts are in
-  `LICENSES/Apache-2.0.txt` and `LICENSES/GPL-2.0.txt` at the root.
+- **Each unit repository has a `LICENSE` file** that explains this and lists exceptions. The license texts are in
+  `LICENSES/Apache-2.0.txt` and `LICENSES/GPL-2.0.txt` in each repository.
 - **Exceptions** (their own licence still applies; see `cmn/LICENSE`): `atomic_32.h` is GPL-2.0-only (derived
   from the Linux kernel), `bitops.h` is Linux kernel GPL-2.0 code, the `*_codec.h` headers are
   LGPL-2.1-or-later, `galois.h` is LGPL-2.1-or-later, `par.h` and `zconf.h`/`zlib.h` keep their authors'
