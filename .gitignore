@@ -1,0 +1,46 @@
+# build output (UNITS.md section 7)
+*.o
+*.a
+*.so
+*.d
+.depend
+*.tmp
+*.log
+core.*
+# installed products (re-created by make)
+/bin/*
+/lib/*
+/lib64/
+/cmn/*
+/run/*
+/tmp/*
+!/bin/.gitkeep
+!/lib/.gitkeep
+!/cmn/.gitkeep
+!/cmn/LICENSE
+!/run/.gitkeep
+!/tmp/.gitkeep
+# fetched units are separate git clones: list them in .git/info/exclude of the project tree
+# the project's own lists live in the project root, never in repo/ (the repo unit is public and
+# shared by all projects).  They belong to the project, not to the base repo; the *.example files
+# are tracked.
+/project.repos
+/project.repos.lock
+/project.repos.new
+/private.units
+/private.units.new
+/.rebuild-needed
+/units.mak
+/units.mak.new
+/.built
+/.old/
+# secrets and personal files: never commit
+.env
+.secrets/
+*.key
+*.pem
+.bash_profile
+.bashrc
+*.save
+*.old
+.old/

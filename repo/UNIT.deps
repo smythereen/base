@@ -1,0 +1,8 @@
+# UNIT.deps for repo -- format: see DEPS-FORMAT.md
+# The repo unit holds the tools that fetch and manage the unit repos of a project.  It
+# is part of the base repo (listed in base.units), so every project has it.
+base 1
+system git      # clone, fetch, checkout
+system curl     # catalog lookups (GET $UNITS_CATALOG_URL/units/<name>)
+system tsort    # coreutils: dependency order and cycle detection
+system awk

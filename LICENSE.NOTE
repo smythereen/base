@@ -1,0 +1,6 @@
+Repository license: Unlicense (public domain). See LICENSE.
+
+Source files may still show SPDX Apache-2.0 OR GPL-2.0-or-later headers.
+Those headers are historical and pending commit-by-commit review; they were
+not mass-rewritten for this local v0.1.0. LICENSES/ retains the Apache and
+GPL texts for those headers.

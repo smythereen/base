@@ -1,0 +1,12 @@
+# private.units - repo URLs of the units that are NOT in the public catalog: private units,
+# forks, local overrides.  Project root, next to project.repos; never part of the repo unit.
+# Copy to private.units, or let "repo add NAME URL" write it.  The base .gitignore ignores it.
+#
+# One unit per line:   <unit>   <repo URL>      (https://, ssh://, git@host:path, file://, a path)
+#
+# A line here wins over the catalog.  A unit that is neither here nor in the catalog cannot be
+# fetched: the tools stop and tell you to add it here.  Dependencies of a private unit that are
+# private too need a line each.
+#
+#acme-ctl	git@git.example.com:acme/acme-ctl.git
+#near	https://github.com/me/near-fork.git

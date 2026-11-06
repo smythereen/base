@@ -1,0 +1,24 @@
+# project.repos - the units of THIS project.  It lives in the project root, not in repo/:
+# the repo unit is a public repo shared by all projects and never holds a project's list.
+# Copy this file to project.repos, or let "repo add" create it.  Keep it out of the repo
+# unit; the base .gitignore ignores it (track it in your own project repo if you want).
+#
+# One unit per line, # starts a comment:
+#
+#   <unit>   [via=<unit>,<unit>]
+#
+# No via=: a unit you asked for (repo add NAME).  Entries with via= are written by
+# fetch-units for units that other units require (the units after via= need it); they are
+# re-computed on every fetch and removed when nothing needs them any more - do not edit them.
+# There is no URL and no version here: a public unit's URL comes from the catalog worker
+# ($UNITS_CATALOG_URL), a private unit's URL from private.units, and the newest version of
+# every unit is always used.  The base units (see base.units) are never listed.
+#
+# A near based project:
+near
+# near requires addr, sig and tpi; fetch-units adds them (with via=near) like this:
+#addr	via=near,tpi
+#sig	via=near
+#tpi	via=near,sig
+# snmp is optional for near (make NEAR_SNMP=1) and is not fetched unless you add it:
+#snmp

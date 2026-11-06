@@ -1,0 +1,4 @@
+# Marker file: this directory is a project tree made from the base repo.
+# Unit makefiles and fetch-units.sh refuse to work without it.
+base-format: 1
+base-version: 0.1.0

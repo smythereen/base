@@ -1,0 +1,30 @@
+SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
+
+Copyright (c) John R. Smythe Jr.
+
+The source files of this unit that carry the SPDX line above are dual
+licensed. You may use, copy, modify and distribute them under EITHER of these
+licenses, at your option:
+
+  * the Apache License, Version 2.0         (LICENSES/Apache-2.0.txt)
+  * the GNU General Public License, version 2 or (at your option) any
+    later version                           (LICENSES/GPL-2.0.txt)
+
+In practice: use the Apache-2.0 terms to put this unit in any project,
+including closed-source ones. The GPL-2.0-or-later alternative exists so the
+unit can be built into the CAYE kernel (GPLv2) and other GPL code.
+
+Each source file names its license in an SPDX-License-Identifier line at the
+top. The full license texts are in the LICENSES directory in the root of the
+CAYE tree.
+
+Exceptions: files that are third-party or derived code, left with their
+original headers; their own license/copyright still applies:
+  - atomic_32.h: GPL-2.0-only. Derived from the Linux kernel's x86 atomic
+    header and adapted by John R. Smythe Jr. Not available under Apache-2.0.
+  - bitops.h: Linux kernel code, Copyright 1992 Linus Torvalds, GPL-2.0.
+  - codec.h, isup_codec.h, l3_codec.h, ss7_codec.h: Copyright Brian Bidulock,
+    LGPL-2.1-or-later.
+  - galois.h: Copyright James S. Plank, LGPL-2.1-or-later.
+  - par.h: Copyright Willem Monsuwe.
+  - zconf.h, zlib.h: Copyright Jean-loup Gailly and Mark Adler (zlib license).
