@@ -259,7 +259,8 @@ LIBRARIES =	-lfar	-lmio	-lnow	-lmap	-lsem	-lsys
 include		../targets.mak
 include	.depend
 EOF
-printf '%s\n' 'base 1' 'require far' 'require mio' > mysvc/UNIT.deps
+printf '%s\n' 'base 1' 'require far' 'require map' 'require mio' 'require sys' > mysvc/UNIT.deps
+# map and mio fetch sem/now for you; list only units you directly need.
 # add mysvc/*.c with main(...) for programs; library .c without main
 # private URL example (writes private.units):
 #   ./repo/repo.sh add mysvc https://github.com/you/mysvc.git
@@ -317,8 +318,12 @@ HOME=$PWD make -C mysvc cleanup
 HOME=$PWD make -C mysvc
 ```
 
-Keep `project.repos.lock` so builds share the same revisions. After intentional
-updates: `repo update`, then `make cleanup && make`, then `repo rebuilt`.
+Keep `project.repos` and `project.repos.lock` so builds share the same revisions.
+`repo update NAME` checks out the newest tag when one exists; switch that unit
+to `main` first only if you deliberately want unreleased code. After an
+intentional update, run `HOME=$PWD make cleanup && HOME=$PWD make` and test.
+The root `make` calls `repo rebuilt` after a successful full build; do not clear
+`.rebuild-needed` manually after a failed build.
 
 ### 5. Performance methodology (measure; do not invent numbers)
 
@@ -335,7 +340,9 @@ Use **your** traffic and **your** clocks:
 ### 6. Staged updates without surprise cascades
 
 1. Copy the lock file aside (`cp project.repos.lock project.repos.lock.good`).
-2. Update one unit (`repo update sys` or edit list + fetch).
+2. Update one unit (`./repo/repo.sh update sys`, or edit the list and `./repo/repo.sh fetch`).
+   The latest tag normally governs updates. A detached release must be switched
+   to `main` explicitly if you intend to track unreleased development.
 3. `HOME=$PWD make cleanup && HOME=$PWD make` and run **your** regression
    tests / smoke tools above.
 4. If broken, restore the previous checkout from `.old/` backups or re-fetch
@@ -506,6 +513,129 @@ public GitHub starter units, you will not get `msg`/`addr`/`near`.
 4. **Still your job:** protocol, accept-loop policy, batching, backpressure,
    systemd/watchdogs, multi-host failover, durable storage, metrics/alerting.
 
+
+
+## `sys` types (`common.h`) and the Trace system
+
+These facilities live in public `sys` (`common.h`, `sysprt.c`, `eventlog.c`) and
+are the shared vocabulary almost every unit includes. They are **not** C bit-field
+widths; the `u8`/`s32`/… names are **typedef aliases** for fixed-size integer
+modes (and floats), selected with GCC `__attribute__((__mode__(…)))`.
+
+### Fixed-width and host-size aliases
+
+From `common.h`:
+
+| Alias | Meaning in this tree |
+|---|---|
+| `u8` / `s8` | 8-bit unsigned / signed (`xN(8,Q)`) |
+| `u16` / `s16` | 16-bit |
+| `u32` / `s32` | 32-bit |
+| `u64` / `s64` | 64-bit |
+| `u128` / `s128` | 128-bit integer modes (`xN(128,T)`) when the compiler provides them |
+| `uchar` | `u_int8_t` |
+| `u_t` / `s_t` | `uintptr_t` / `intptr_t` — pointer-sized host aliases |
+| `f32` / `f64` | 32- / 64-bit binary floats (`fN`) |
+| `f80` | x87 extended (`long double` when `LDBL_MANT_DIG == 64` on i386/x86_64) |
+| `f128` | IEEE quad when available (`long double` or `__float128`) |
+| `f_t` | **Largest float actually present**: `f128`, else `f80`, else `f64` |
+| `stamp_t` | `struct timeval` |
+
+`F80_MANT_DIG` / `F128_MANT_DIG` / `F_T_MANT_DIG` are defined only when that
+type exists. Do not assume every host has `f80` or `f128`.
+
+**Word size / endian:** public `sys` for `SYS_VARIANT=linux-x86_64` is a
+little-endian 64-bit Linux tree. `common.h` does **not** define `htonl` /
+`ntohl` (or similar) helpers—network byte-order conversion is **not** a
+built-in `sys` API in the public headers. Code that needs wire order must use
+the usual libc converters or its own protocol unit. This variant is **not**
+claimed portable to other endianness or ILP32-only targets; `atomic` headers
+operate on `s32` counters (`atomic_32.h`) and assume the matching CPU atomics.
+
+Linking `sys` does not require a separate `-latomic` for the inline `S32_*`
+helpers—those are header inline asm once `atomic` headers are in `~/cmn`.
+
+### Trace vs EventLog
+
+| Mechanism | Role |
+|---|---|
+| **Trace / SysPrt** | Diagnostic print path, gated by bit flags in `TraceLevel` (or `*TracePointer`) |
+| **EventLog** | Operational event lines appended to a log file (`ELOG_FILE` or `event.log`) |
+
+They are different. Trace is for developer/ops diagnostics you can turn down.
+EventLog is for durable-ish event records. A 24/7 service should **not** leave
+high-volume Trace bits on unbounded; rotate or redirect print files
+(`Initialize_Print` / `PrintDays`) and treat EventLog as the operational trail.
+This README does not invent telemetry buffers or a metrics API.
+
+### How Trace gating works (exact macros)
+
+Globals in `sysprt.c` / `common.h`:
+
+- `u32 TraceLevel` — per-process flag word (default 0 until you set it)
+- `u32 *TracePointer` — if **non-NULL**, `Is_Trace_Level` reads `*TracePointer`
+  instead (shared mapped flag word is a **convention** you wire; there is no
+  built-in “mio Trace API”)
+- `LocalName`, `PrintName`, `PrintPID`, `PrintStamp`, `PrintDays`, `PrintStdOut`
+
+```c
+/* common.h — simplified */
+static inline int Is_Trace_Level( u32 x )
+{
+	return ( x ) == 0
+	    || ( ( x ) & ( TracePointer != 0 ? *TracePointer : TraceLevel ) ) != 0;
+}
+#define If_Trace_Level( x )	if( Is_Trace_Level( x ) )
+#define Trace( level, ... )	{ If_Trace_Level( level ) SysPrt( __VA_ARGS__ ); }
+```
+
+So `Trace(FLAG, "…%d", expr)` **does not evaluate** `expr` / call `SysPrt`
+unless the level matches (or `FLAG == 0`, which always prints). Prefer `Trace`
+over bare `printf` when you want that gating. Plain `printf` always runs.
+
+`SysPrt` writes to **fd 2** (`write(2, …)`). Optional stamp/name/pid prefixes
+use `PrintStamp` (atomic nest count), `PrintName`, `PrintPID`.
+`Initialize_Print(path)` redirects stderr (and optionally stdout) to a trace
+file; **`Initialize_Print(NULL)` fails (−1)**—for ordinary stderr you simply
+do not call it. `Reset_Print` / `PrintDays` rotate `*.trc` style files when
+configured.
+
+### Public unit flag bits (from headers)
+
+Use hex with `printf("%#x", …)` when documenting:
+
+| Symbol | Value | Header |
+|---|---|---|
+| `SYS_TRC_LVL` | `0x80000000` | `common.h` |
+| `FAR_TRC_LVL` | `0x40000000` | `far.h` |
+| `MAP_TRC_LVL` | `0x08000000` | `map.h` |
+| `SEM_TRC_LVL` | `0x08000000` | `sem.h` (same bit as map in current trees) |
+| `BIT_TRC_LVL` | `0x04000000` | `bitops.h` |
+
+There is **no** public `MIO_TRC_LVL` define. `now.h` has a commented
+`NOW_TRC_LVL`. `tp.c` / `tpi.c` contain commented assignments to
+`TP_TRC_LVL` / `TPI_TRC_LVL`, but those macros are **not** defined in the
+current public headers—do not invent values.
+
+Enable in `main` (or early init), for example:
+
+```c
+#include <common.h>
+#include <map.h>
+
+int main( void )
+{
+	LocalName = "mysvc";
+	TraceLevel = SYS_TRC_LVL | MAP_TRC_LVL;	/* or TracePointer = &shared_flags; */
+	Trace( MAP_TRC_LVL, "map path ready %#x\n", TraceLevel );
+	/* … */
+	return 0;
+}
+```
+
+Build/link the smallest public path: `#include <common.h>`, link `-lsys`
+(after `make header` so `atomic_32.h` is in `~/cmn`). Units often set
+`TraceLevel = MAP_TRC_LVL` (etc.) locally inside a tool’s `main`.
 
 ## Portability limits
 
