@@ -1203,6 +1203,133 @@ the previous copied tree if you use the copy method. Facts during a roll:
   completely first. Re-run the step 9 identity check when the roll ends.
 - Keep at least one healthy node in the balancer at all times.
 
+### 11a. Machine failure and role takeover
+
+**Yes, another machine can take over a failed machine's processing**—because
+every host has the identical tree, any host can start any role
+(`bin/start-role server-2` exists on host1 too). But **nothing does it for
+you**: no public unit (`sys atomic far map sem now mio tp tpi`) detects a dead
+machine, moves a role, moves an IP, or replicates data. A dead machine is
+invisible at the unit library level—a library can only see its own process.
+Detection and takeover are operator (or your own automation) steps.
+
+Two different failures:
+
+| Failure | Who handles it | What happens |
+|---|---|---|
+| The **process** dies (crash, kill) | `systemd` on the same host (`Restart=on-failure` in `echorole@.service`) | restarted in place after `RestartSec=2`; same host, same port |
+| The **machine** dies (power, kernel, network) | **you** (or your own failover tooling) | start the same role on another host and point traffic there |
+
+#### Plan the spare before you need it
+
+- **Active-active:** host1 and host2 both serve behind the balancer. Losing one
+  host leaves the other serving; takeover is only needed to restore capacity.
+- **Active-standby / spare:** a `host3` with the identical tree (step 9) and
+  the systemd template installed, but **no role enabled**. It is used only
+  when a host fails.
+- Choose ports so a role can run on the spare unchanged (here every
+  `echoctr` role listens on `7101`), and make sure the spare's firewall allows
+  that port.
+- Keep `rolemap.txt` (host, role, port) as the record of who runs what.
+
+#### Step by step: host2 (`server-2`) fails, `host3` takes over
+
+All commands are examples to run by hand; replace host names and addresses
+with yours.
+
+1. **Detect.** Your monitor runs `echoproj-check` (step 11) and alerts:
+
+   ```sh
+   ./echoproj-check host2 7101 || echo "host2 server-2 down"
+   ssh -o ConnectTimeout=5 svc@host2 true || echo "host2 unreachable"
+   ```
+
+   If ssh works and only the process is down, look at
+   `systemctl --user status echorole@server-2` on host2 first; that is a
+   process failure, not a machine failure.
+
+2. **Fence the failed machine (prevent split brain).** Before another host
+   serves `server-2`, make sure host2 cannot come back and serve it too. If
+   host2 is reachable at all, stop and disable the role there:
+
+   ```sh
+   ssh svc@host2 'systemctl --user disable --now echorole@server-2'
+   ```
+
+   If it is **unreachable**, do not wait on it: power it off or isolate it
+   through whatever you control (hypervisor/cloud console, PDU, switch port),
+   and mark it "do not start" before it is ever rebooted. A rebooted host2
+   with `echorole@server-2` still enabled would start the role again.
+
+3. **Verify the spare is identical** (step 9 identity check) and healthy:
+
+   ```sh
+   ssh svc@host3 'cd ~/echoproj && git rev-parse HEAD && sha256sum project.repos.lock && ls bin/start-role'
+   ```
+
+   Compare with a healthy node (host1). Do not take over on a mismatched tree.
+
+4. **Start the role on the spare:**
+
+   ```sh
+   ssh svc@host3 'systemctl --user enable --now echorole@server-2 &&
+     systemctl --user is-active echorole@server-2'
+   ./echoproj-check host3 7101          # -> id=server-2 port=7101 count=0...
+   ```
+
+   The role name and port are the same; only the host changed.
+
+5. **Point traffic at the spare.** With the nginx example, replace host2 with
+   host3 in the upstream on the balancer host and reload:
+
+   ```nginx
+   upstream echoproj_udp {
+       server host1:7101 max_fails=3 fail_timeout=10s;
+       server host3:7101 max_fails=3 fail_timeout=10s;   # was host2
+   }
+   ```
+
+   ```sh
+   sudo nginx -t && sudo nginx -s reload
+   for i in 1 2 3 4; do printf 'ping' | nc -u -w1 lbhost 7100; done   # server-1 / server-2
+   ```
+
+   If clients reach host2 directly instead of through a balancer, you must
+   move what they use: DNS name (TTL delays apply), or a service IP you move
+   to host3 yourself (`ip addr add <service-ip>/<len> dev <if>` on host3 after
+   host2 is fenced). base provides neither.
+
+6. **Record it.** Update `rolemap.txt` (`host3 server-2 7101`) so the next
+   roll-out (step 11) targets the right host.
+
+7. **Later, repair host2** as a fresh spare: rebuild/verify the tree (step 9),
+   leave `echorole@server-2` disabled until you deliberately move the role back
+   (same steps, reversed).
+
+#### What takeover does **not** give you
+
+- **In-flight work is lost.** Datagrams sent to host2 while it was dying get no
+  reply; `echoctr`'s counter starts again at 0 on host3. Anything kept in
+  process memory or a `map`ped file on host2 stays on host2—mapped files are
+  local, not shared across nodes.
+- **Duplicates are possible.** A client that retries after a timeout may have
+  had its request processed already. Making requests idempotent (request IDs,
+  dedup) and keeping durable state in a transactional store or durable queue
+  is application design.
+- **A real smoke test is a real request.** `ping` proves the process answers;
+  for a service with state or TCP sessions, test the actual operation and its
+  acknowledgement after takeover, and expect clients to reconnect.
+- **The balancer is its own single point of failure.** If `lbhost` dies,
+  everything behind it is unreachable. Redundant balancers need your own
+  shared-IP/VRRP setup or DNS failover.
+- **Source copies are not data copies.** The identical trees (step 8) let any
+  node rebuild and run any role; they do not hold the other nodes' live data.
+
+The messaging units (`msg`, `addr`, `near`) are described in this README as
+the layer a design could use for node-to-node coordination, but no public API
+for them is documented here, so this tutorial does not rely on them for
+failover.
+
 ### 12. What the application owns vs what base provides
 
 | Concern | base + public units | Your application / operations |
@@ -1213,7 +1340,7 @@ the previous copied tree if you use the copy method. Facts during a roll:
 | Shared state on **one** host | `map` (+`sem`, `atomic`) | anything shared **between** hosts: replication, consensus, a database |
 | Process lifecycle | — | systemd/supervisor units, restart policy, lingering, resource limits |
 | Load balancing | — | balancer software, its config, its own redundancy (one LB is a single point of failure) |
-| Health and failover | — | probes, removing dead nodes, paging a human |
+| Health and failover | systemd restarts a crashed process in place (your template) | detecting dead machines, fencing, starting the role on a spare, moving traffic (step 11a) |
 | Disks, backups, capacity | — | disk-full handling for `event.log`/trace files, backups, monitoring |
 | Network | — | firewalls, port allocation, DNS, TLS/auth if needed |
 | Deployment | — | keeping trees identical (clone/rsync/your orchestration), role assignment, rolling procedure, rollback |
@@ -1238,6 +1365,7 @@ blocks; the multi-server behavior above is code and config you own.
 [ ] each node probed directly
 [ ] LB config you own; alternating replies through the LB
 [ ] health check + one-host-at-a-time roll-out + tested rollback
+[ ] spare host verified; role takeover + fencing rehearsed (step 11a)
 ```
 
 ---
