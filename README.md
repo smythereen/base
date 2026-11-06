@@ -381,12 +381,13 @@ high availability: what the application must own is listed in step 12.
 | Where | Needs |
 |---|---|
 | Build host | Linux x86-64, `bash`, **GNU make**, `gcc`, `ar`, `ranlib`, `git`, `curl`, `tsort`, `awk`, `sed`; HTTPS access to GitHub and to the catalog worker |
-| Each server | Linux x86-64 with glibc (the program links the unit `.a` libraries statically; `ldd` shows only libc), `systemd` with user services (or just a shell, see 9b), an open UDP port |
-| C++ (optional) | `g++` on the build host; on servers, a compatible `libstdc++` **or** a static C++ runtime (step 3b) |
+| Each server | the **same** as the build host (every machine holds and builds the identical project tree, step 8–9); `systemd` with user services (or just a shell, see 9b); an open UDP port. Unit libraries link statically (`ldd bin/echoctr` shows only libc) |
+| C++ (optional) | a C++ compiler as `CXX` on every building host (`g++` is the conventional choice; this tutorial's run used a clang++ driver, step 3b) |
 | Probing | `nc` (netcat with `-u`) **or** `python3`; both forms are shown |
 
-The servers do **not** need make, gcc, git or the unit sources. They run the
-artifact you built once.
+Servers carry the full tree and toolchain because each one builds it (step 9).
+If a server must not compile, copy the **whole** built tree to it instead
+(step 9, alternative); never a lone binary.
 
 ### 1. Bootstrap the project from an empty directory
 
@@ -717,21 +718,18 @@ Build and probe exactly like the C server (`HOME=$PWD make`, then
 `./bin/echoxx node-x 7121` and `ping` / `stats`). Expected replies are the same
 format: `pong node-x 1`, `id=node-x port=7121 count=3 up_us=…`.
 
-**Runtime library:** a program linked by `g++` depends on the shared
-`libstdc++.so.6` (and `libgcc_s`) unless you link it statically. Check with
-`ldd bin/echoxx` before shipping. Either make sure every server has a
-`libstdc++` at least as new as the build host's, or add
-`-static-libstdc++ -static-libgcc` to the link (for example put them in the
-unit's `LIBRARIES` after `-lsys`). Everything else in steps 5–12
-(instances, systemd template, load balancer, rolling deploy) is identical:
-replace `echoctr` with `echoxx` in the paths and the template name.
+**Runtime library:** a C++ program needs the C++ runtime of the compiler that
+linked it; check `ldd bin/echoxx` on each host. Because every host builds the
+same tree with the same toolchain (step 9), the runtime matches by
+construction. Everything else in steps 5–12 is identical: `echoxx` is just
+another executable in `bin/` that a role can start (see `server-cxx` in 8b).
 
 *Proof note:* the build host used for this tutorial had no `g++`, so the C++
-example was compiled through the **same** `rules.mak` `.cc` rule with a clang
-C++ driver passed as `CXX=…`, linked against the C archives `libfar.a`,
+example was compiled through the **same** `rules.mak` `.cc` rule with a clang++
+driver passed as `CXX=…` (tested; `g++` itself was **not** run), linked against the C archives `libfar.a`,
 `libnow.a`, `libsys.a`, and probed (`pong cxx 1`, echo, `stats`, SIGTERM →
-`stop signal 15 count 3` in `event.log`). With `g++` the command is the one
-`rules.mak` prints: `g++ -MD -o echoxx $(CXXFLAGS) echoxx.cc -L$(LIB) -lfar -lnow -lsys`.
+`stop signal 15 count 3` in `event.log`). The rule's command shape is
+`$(CXX) -MD -o echoxx $(CXXFLAGS) echoxx.cc -L$(LIB) -lfar -lnow -lsys`.
 
 ### 4. Build: `make`, `units.mak`, restarts, logs
 
@@ -846,7 +844,7 @@ set by the signal handler, logs, closes the socket and exits 0.
 |---|---|---|
 | Flags | `rules.mak` default: `-g -O0 -march=native -fPIC -fcommon …` | same flags with `-O2` and a **portable** `-march` (see below) |
 | Rebuild | `HOME=$PWD make -C echoctr` (just your unit) or plain `make` (incremental) | clean: `make cleanup && make` from a recorded commit + lock |
-| Restart | `kill -TERM` the process, re-run `./bin/echoctr …` | build **once**, copy the artifact, restart service units one host at a time |
+| Restart | `kill -TERM` the process, re-run `./bin/echoctr …` | identical tree on every host from the recorded commit + lock; restart only that host's role instances, one host at a time |
 | Units | newest revisions via `repo update` while you work | exactly the revisions in the saved `project.repos.lock` |
 
 **`-march=native` is a deployment trap**: a binary built on a newer CPU can
@@ -864,70 +862,200 @@ ldd bin/echoctr                    # expect only linux-vdso, libc, ld-linux
 Keep `-I$(HDR)` (single quotes so make, not the shell, expands it). Pick the
 `-march` level that all your servers support.
 
-### 8. Make a reproducible release artifact
+### 8. Multi-server model: one identical project tree, different roles
 
-base `.gitignore` ignores `project.repos`, `project.repos.lock`, `units.mak`
-and build state, so **keep your project in its own git repository** (your
-`echoctr` unit plus a copy of the list and lock). Record what produced the
-binary and ship that record with it:
+In multi-server operation **every machine has the same project tree**: the
+same base checkout, the same `project.repos` / `project.repos.lock`, the same
+unit revisions, the same `units.mak`, the same build flags, and therefore the
+same set of executables in `bin/`. What differs per machine is only **which
+executables you start there** (its *role*). Nothing auto-starts: `make`
+builds libraries and installs programs; a program runs only when you (or your
+supervisor) launch it.
 
-```sh
-REL=echoctr-$(git -C echoctr rev-parse --short HEAD 2>/dev/null || date +%Y%m%d%H%M%S)
-mkdir -p tmp/$REL/bin
-cp -p bin/echoctr tmp/$REL/bin/
-cp -p project.repos project.repos.lock tmp/$REL/
-( cd tmp/$REL && sha256sum bin/echoctr > SHA256SUMS )
-tar -C tmp -czf tmp/$REL.tar.gz $REL
-sha256sum tmp/$REL.tar.gz
+```text
+ host1 (role server-1)          host2 (role server-2)          lbhost (role balancer)
+ ~/echoproj  (identical)        ~/echoproj  (identical)        your LB software
+   bin/echoctr  bin/echoxx        bin/echoctr  bin/echoxx        (+ the tree, optional)
+   bin/start-role                 bin/start-role
+ runs: echoctr server-1 7101    runs: echoctr server-2 7101
 ```
 
-To rebuild the **same** unit revisions later on another build host, clone base,
-put back `project.repos` and the lock, fetch, then pin each unit to the
-recorded rev:
+Rules that keep machines interchangeable:
+
+- No per-machine source edits and no "lighter" machines missing executables.
+  Any host can take any role by starting different programs.
+- Same CPU/ISA baseline and same OS family on all hosts (public `sys` is
+  `linux-x86_64` only), and a portable `-march` (step 7), so a binary built
+  on one host would also run on the others.
+- Same compiler versions on every build host if you compare binaries.
+- A different OS/hardware variant would be a different `SYS_VARIANT` and a
+  different tree build; do not mix variants inside one role group.
+
+#### Side benefit: every node is a copy of the project source
+
+Because each participating machine holds the complete tree (base, every unit
+checkout, your application source, list and lock), the source is present on
+every node. If the development machine is gone, any node can rebuild the
+project or seed a new machine from its tree—given the same toolchain and
+`SYS_VARIANT`.
+
+Limits, stated plainly:
+
+- base does **not** replicate anything. Trees are identical only because you
+  keep them so (clone + pinned lock, `rsync`, or your own orchestration).
+- A node has what was last synced: not uncommitted work, not branches or
+  history that were never pushed. (Unit checkouts made by `repo fetch` are
+  full clones; only its internal probe clones are shallow.) Keep your real git remote(s) and normal backups.
+- Live service data (`run/`, `event.log`, mapped `.mem` files, databases) is
+  **per node** and is not a backup of anything; back it up separately.
+- Node-local settings (systemd instance names, `.bash_profile` edits,
+  balancer config, secrets) are outside the synced source; exclude them from
+  any sync and keep them in your ops records.
+- Confirm the copies really match with the identity check in step 9
+  (`git rev-parse HEAD`, `sha256sum project.repos.lock`, per-unit revs).
+
+#### 8a. Put your project's own files under your own git
+
+base ignores `project.repos`, `project.repos.lock`, `private.units` and build
+state. Keep them in **your** repository, with your application unit. The
+simplest layout is the `echoctr` unit as its own git repo that also carries
+the project list files and the role script:
+
+```text
+echoctr/                  (your git repo, e.g. https://git.example.invalid/you/echoctr.git)
+  makefile  UNIT.deps  echoctr.c  start-role.sh
+  project/project.repos  project/project.repos.lock
+```
+
+(`echoxx` is the same pattern: its own unit directory, or its own repo.)
+`project/` is a plain directory with no makefile, so the build ignores it;
+it is just where you keep the list and lock under version control.
+Register the unit in the project so every machine fetches it:
 
 ```sh
+./repo/repo.sh add echoctr https://git.example.invalid/you/echoctr.git   # writes private.units
+```
+
+The URL is a placeholder: use your own remote.
+
+#### 8b. The role script (installed by `make product`)
+
+`rules.mak` installs every `*.sh` in a unit into `~/bin` without the suffix,
+so `echoctr/start-role.sh` becomes `bin/start-role` on every host:
+
+```bash
+#!/usr/bin/env bash
+# start-role ROLE : start the executables assigned to ROLE (foreground).
+# Same script, same tree on every machine; only the ROLE argument differs.
+# OPERATOR: fill in your own role names, IDs and ports below.
+set -eu
+cd "$HOME/run"
+export ELOG_FILE="${ELOG_FILE:-$HOME/run/event.log}"
+case "${1:-}" in
+server-1)	exec "$HOME/bin/echoctr" server-1 7101 ;;
+server-2)	exec "$HOME/bin/echoctr" server-2 7101 ;;
+server-cxx)	exec "$HOME/bin/echoxx"  server-cxx 7121 ;;
+*)		echo "usage: start-role server-1|server-2|server-cxx" >&2; exit 2 ;;
+esac
+```
+
+```sh
+chmod 755 echoctr/start-role.sh       # keep the execute bit in git
+HOME=$PWD make
+HOME=$PWD ./bin/start-role server-1 & # -> "pong server-1 1" on udp/7101
+```
+
+Role names are names **you** choose (`server-1`, not a real hostname). Which
+host carries which role is an operator decision recorded wherever you keep
+ops data (a systemd instance name, below, is enough). A role that needs
+several programs starts each one as its own supervised instance (one
+`start-role` case per program) rather than backgrounding them inside the
+script. If you later add other units with executables (for example the
+`tp` operator tools, or messaging units once you use them), they are built on
+every host too and only appear in the roles that use them.
+
+### 9. Set up each machine from the same commit (build on every host)
+
+Preferred: every host builds its own identical tree from the same records.
+On **host1, host2, …** as the service user `svc` (placeholders):
+
+```sh
+git clone https://github.com/smythereen/base.git ~/echoproj
+cd ~/echoproj
+git checkout <base-commit>                       # the base commit you recorded
+export PROJECT_WORKER_URL=https://unit-catalog.dejavu-archive.workers.dev
+export UNITS_CATALOG_URL=https://unit-catalog.dejavu-archive.workers.dev
+export CC=gcc CXX=g++                            # same toolchain on every host
+# your list, lock and private URLs (from your echoctr repo / ops repo):
+git clone https://git.example.invalid/you/echoctr.git /tmp/echoctr-src
+cp /tmp/echoctr-src/project/project.repos /tmp/echoctr-src/project/project.repos.lock .
+printf 'echoctr\thttps://git.example.invalid/you/echoctr.git\n' > private.units
 HOME=$PWD ./repo/repo.sh fetch
+# pin every unit to the recorded revision (fetch alone takes the newest)
 while read -r unit url ver rev; do
 	[ -d "$unit/.git" ] && git -C "$unit" checkout -q "$rev"
-done < project.repos.lock
+done < /tmp/echoctr-src/project/project.repos.lock
+cp /tmp/echoctr-src/project/project.repos.lock project.repos.lock
+HOME=$PWD make cleanup
+HOME=$PWD make \
+  'CFLAGS=-O2 -g -march=x86-64-v2 -fPIC -fcommon -I$(HDR) -Wno-implicit-int -Wno-address-of-packed-member' \
+  'CXXFLAGS=-O2 -g -march=x86-64-v2 -fPIC -I$(HDR) -Wno-write-strings -Wno-address-of-packed-member'
+grep -nE 'error:|\*\*\* |Error [0-9]' *.log || echo "no build errors"
+```
+
+`project.repos.lock` lines are `<unit> <url> <version> <git-rev>`; the loop
+checks each unit out at that rev. No global git checkout is involved: the
+only clones are the project root (base) and its unit subdirectories.
+
+Verify that hosts are identical **before** starting roles:
+
+```sh
+cd ~/echoproj
+git rev-parse HEAD                                 # base commit
+sha256sum project.repos.lock
+for u in $(sed -n 's/^UNITS[[:space:]]*:=//p' units.mak); do
+	printf '%-10s %s\n' "$u" "$(git -C "$u" rev-parse HEAD 2>/dev/null || echo base-unit)"
+done
 HOME=$PWD ./repo/repo.sh status
+ls bin
 ```
 
-(`repo fetch`/`update` otherwise move to the newest version.) The safest rule
-is simpler: **build once, deploy that tarball everywhere, and compare
-`sha256sum` on every host.**
+Run that on every host (e.g. `ssh svc@host1 'cd ~/echoproj && …'`) and
+compare: the base commit, lock checksum, unit revisions and `bin/` listing
+must match exactly. `repo status` should show every unit `clean` at the same
+`NOW` version. Binary checksums (`sha256sum bin/echoctr`) match only when
+the toolchain and project path are also the same; the source revisions are
+the authoritative check.
 
-### 9. Install on one server
-
-Copy and unpack under the service user's own home (no root, nothing global):
+**Alternative: copy the complete tree.** If servers must not compile, build
+once on a build host of the same ISA and copy the **whole project directory**
+(not just one binary), so each host still has the identical durable tree:
 
 ```sh
-REL=echoctr-abc1234                # your release name from step 8
-scp tmp/$REL.tar.gz svc@host1:
-ssh svc@host1 "mkdir -p ~/echoctr/releases ~/echoctr/run &&
-  tar -C ~/echoctr/releases -xzf ~/$REL.tar.gz &&
-  cd ~/echoctr/releases/$REL && sha256sum -c SHA256SUMS &&
-  ln -sfn ~/echoctr/releases/$REL ~/echoctr/current"
+rsync -a --delete --exclude='run/' --exclude='tmp/' ~/echoproj/ svc@host1:echoproj/
+ssh svc@host1 'cd ~/echoproj && sha256sum project.repos.lock bin/*'
 ```
 
-#### 9a. User-owned systemd template unit
+Compare those checksums with the build host. Same tree, same executables,
+different roles—just as in the build-everywhere case.
 
-One template, one small environment file per instance (explicit server ID and
-port; nothing hidden):
+#### 9a. Supervise roles with a user-owned systemd template
+
+The instance name **is the role**; the tree is the same on every host:
 
 ```sh
-ssh svc@host1 'mkdir -p ~/.config/systemd/user ~/.config/echoctr'
-ssh svc@host1 'cat > ~/.config/systemd/user/echoctr@.service' <<'EOF'
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/echorole@.service <<'EOF'
 [Unit]
-Description=echoctr UDP echo/counter instance %i
+Description=echoproj role %i
 After=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/echoctr/%i.env
-Environment=ELOG_FILE=%h/echoctr/run/event.log
-WorkingDirectory=%h/echoctr/run
-ExecStart=%h/echoctr/current/bin/echoctr ${SERVER_ID} ${PORT}
+Environment=HOME=%h/echoproj
+Environment=ELOG_FILE=%h/echoproj/run/event.log
+WorkingDirectory=%h/echoproj/run
+ExecStart=%h/echoproj/bin/start-role %i
 KillSignal=SIGTERM
 TimeoutStopSec=5
 Restart=on-failure
@@ -936,81 +1064,73 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 EOF
-ssh svc@host1 'printf "SERVER_ID=host1-a\nPORT=7101\n" > ~/.config/echoctr/a.env'
-ssh svc@host1 'systemctl --user daemon-reload &&
-  systemctl --user enable --now echoctr@a &&
-  systemctl --user status --no-pager echoctr@a'
+systemctl --user daemon-reload
+systemctl --user enable --now echorole@server-1     # on host1
+# systemctl --user enable --now echorole@server-2   # on host2
+systemctl --user status --no-pager echorole@server-1
 ```
 
-User services stop at logout unless lingering is enabled for that account. That
-is a one-time admin action on each host: `sudo loginctl enable-linger svc`.
-
-Day-to-day control:
+User services stop at logout unless lingering is on for that account (one-time
+admin action per host: `sudo loginctl enable-linger svc`).
 
 ```sh
-systemctl --user stop    echoctr@a     # SIGTERM -> "stop signal 15" in event.log
-systemctl --user start   echoctr@a
-systemctl --user restart echoctr@a
-journalctl --user -u echoctr@a -n 20   # stderr trace lines
-tail -n 20 ~/echoctr/run/event.log     # EventLog lines
+systemctl --user stop    echorole@server-1   # SIGTERM -> "stop signal 15" in run/event.log
+systemctl --user start   echorole@server-1
+systemctl --user restart echorole@server-1
+journalctl --user -u echorole@server-1 -n 20
+tail -n 20 ~/echoproj/run/event.log
 ```
 
-A second instance on the same host is just another env file:
-`printf "SERVER_ID=host1-b\nPORT=7102\n" > ~/.config/echoctr/b.env` then
-`systemctl --user enable --now echoctr@b`.
+Moving a role to another host is `disable --now` on one and `enable --now`
+on the other—no rebuild, because every host already has every executable.
 
 #### 9b. Foreground alternative (no systemd)
 
 ```sh
-cd ~/echoctr/run
-ELOG_FILE=$PWD/event.log exec ~/echoctr/current/bin/echoctr host1-a 7101
+cd ~/echoproj && HOME=$PWD ./bin/start-role server-1
 ```
 
 Run it under `tmux`/`screen` or your own supervisor. Without a supervisor
-nothing restarts it after a crash or reboot—that is your decision to make.
+nothing restarts it after a crash or reboot—that is your decision.
 
-### 10. Multi-server topology
+### 10. Multi-server topology and the load balancer
 
 ```text
              clients
                 │  udp/7100
                 ▼
-     ┌─────────────────────┐   load balancer: YOUR process, YOUR config
-     │  lb host (nginx)     │   (not provided by base or any unit)
+     ┌─────────────────────┐   load balancer: YOUR software, YOUR config,
+     │  lbhost (balancer)  │   on its own host or co-located on host1
      └──────┬────────┬─────┘
             │        │ udp/7101
             ▼        ▼
-       host1:7101  host2:7101     same tarball, same sha256,
-       echoctr@a   echoctr@a      different SERVER_ID per node
+       host1:7101  host2:7101     identical ~/echoproj on both,
+       server-1    server-2       different role started
 ```
 
-Repeat step 9 on `host2` with `SERVER_ID=host2-a`. Then verify each node
-directly before putting a balancer in front:
+Check each node directly before putting a balancer in front:
 
 ```sh
-for h in host1 host2; do
-	ssh svc@$h 'sha256sum ~/echoctr/current/bin/echoctr; readlink ~/echoctr/current'
-	printf 'ping' | nc -u -w1 $h 7101       # or: udpq $h 7101 ping
-done
+for h in host1 host2; do printf 'ping' | nc -u -w1 $h 7101; done
+# -> pong server-1 1 / pong server-2 1
 ```
 
-The `sha256sum` values must be identical; the `pong` replies must name
-different server IDs.
-
-Example balancer, **open-source nginx `stream` module** (one option; HAProxy,
-LVS/IPVS, DNS or client-side lists also work). You install, run and pay for
-it yourself—nothing here is deployed for you:
+The balancer is **not** a base unit or a project executable. Install and run
+it yourself (open-source nginx `stream` shown; HAProxy, LVS/IPVS, DNS or a
+client-side server list also work). A dedicated `lbhost` avoids competing with
+a server role; co-locating it on host1 works but makes host1 a single point of
+failure for both roles. Nothing here is a hosted or paid service.
 
 ```nginx
 # /etc/nginx/nginx.conf (top level, outside the http{} block)
 stream {
-    upstream echoctr_udp {
+    upstream echoproj_udp {
         server host1:7101 max_fails=3 fail_timeout=10s;
         server host2:7101 max_fails=3 fail_timeout=10s;
     }
     server {
         listen 7100 udp;
-        proxy_pass echoctr_udp;
+        proxy_pass echoproj_udp;
         proxy_responses 1;     # one reply datagram per request
         proxy_timeout 2s;
     }
@@ -1018,74 +1138,70 @@ stream {
 ```
 
 `nginx -t && nginx -s reload`, then `printf 'ping' | nc -u -w1 lbhost 7100`
-several times: replies alternate between `host1-a` and `host2-a`.
+several times: replies alternate between `server-1` and `server-2`.
 Open-source nginx only marks a node bad **passively** (after failed
-requests); it does not actively probe. Active checks are your script (below)
-or another balancer.
+requests); active checks are your script (below) or another balancer.
 
-Counters are **per process**: each node counts only what it received. A
-"cluster total" means summing `stats` from every node yourself. The `map`
-module cannot fix that—an mmapped file lives on one machine.
+Counters are **per process**: each role counts only what it received. A
+cluster total means summing `stats` from every node yourself. A `map`ped file
+lives on one machine; nothing replicates it.
 
-### 11. Health monitoring and safe rolling deployment
+### 11. Health monitoring and safe rolling updates
 
-A health probe that any monitor or cron job can call (exit 0 = healthy):
+A health probe any monitor or cron job can call (exit 0 = healthy):
 
 ```sh
 #!/usr/bin/env bash
-# echoctr-check HOST PORT  -> prints the stats line, exits non-zero if no reply
+# echoproj-check HOST PORT  -> prints the stats line, exits non-zero if no reply
 set -u
 reply=$(printf 'stats' | nc -u -w1 "$1" "$2") || true
 [ -n "$reply" ] && { echo "$1:$2 $reply"; exit 0; }
 echo "$1:$2 NO REPLY" >&2; exit 1
 ```
 
-Rolling deployment, one host at a time, stopping at the first failure. Draining
-a node from the balancer is shown as a comment because how you do it depends on
-your balancer (edit the upstream and reload, mark it `down`, etc.):
+An update is: record a new base commit + lock in your repo, then on each host
+in turn bring the **same** tree to those records, rebuild, verify, and restart
+only that host's roles. One host at a time, stop at the first failure:
 
 ```sh
 #!/usr/bin/env bash
-# roll-out REL host1 host2 ...   (REL = release name from step 8)
+# roll-out ROLEMAP : lines "host role port", e.g.
+#   host1 server-1 7101
+#   host2 server-2 7101
 set -euo pipefail
-REL=$1; shift
-for h in "$@"; do
-	echo "== $h"
+while read -r h role port; do
+	[ -z "$h" ] && continue
+	echo "== $h ($role)"
 	# 1. drain: remove $h from the LB upstream and reload the LB (your step)
-	scp "tmp/$REL.tar.gz" "svc@$h:"
-	ssh "svc@$h" "set -e
-		mkdir -p ~/echoctr/releases
-		tar -C ~/echoctr/releases -xzf ~/$REL.tar.gz
-		cd ~/echoctr/releases/$REL && sha256sum -c SHA256SUMS
-		ln -sfn ~/echoctr/releases/$REL ~/echoctr/current
-		systemctl --user restart echoctr@a
-		sleep 1
-		systemctl --user is-active echoctr@a"
-	./echoctr-check "$h" 7101 || { echo "== $h unhealthy: stop and roll back"; exit 1; }
+	ssh -n "svc@$h" "set -e; cd ~/echoproj
+		git -C /tmp/echoctr-src pull -q
+		cp /tmp/echoctr-src/project/project.repos .
+		HOME=\$PWD ./repo/repo.sh fetch
+		while read -r u url v rev; do [ -d \$u/.git ] && git -C \$u checkout -q \$rev; done \
+			< /tmp/echoctr-src/project/project.repos.lock
+		cp /tmp/echoctr-src/project/project.repos.lock .
+		HOME=\$PWD make cleanup >/dev/null
+		HOME=\$PWD make >/dev/null    # plus the same CFLAGS/CXXFLAGS as step 9
+		! grep -qE 'error:|\*\*\* |Error [0-9]' *.log
+		sha256sum project.repos.lock
+		systemctl --user restart echorole@$role
+		sleep 1; systemctl --user is-active echorole@$role"
+	./echoproj-check "$h" "$port" || { echo "== $h unhealthy: stop and roll back"; exit 1; }
 	# 2. undrain: put $h back in the LB upstream and reload (your step)
-done
-echo "== all hosts on $REL"
+done < rolemap.txt
 ```
 
-Rollback is the same switch pointed at the previous release directory:
+Rollback is the same procedure with the previous recorded lock (keep it in
+your repo history, e.g. `git -C /tmp/echoctr-src checkout <previous>`), or
+the previous copied tree if you use the copy method. Facts during a roll:
 
-```sh
-ssh svc@host1 'ln -sfn ~/echoctr/releases/<previous> ~/echoctr/current &&
-  systemctl --user restart echoctr@a'
-```
-
-Facts that matter during a roll:
-
-- `restart` sends SIGTERM; `echoctr` exits within about one second (its `far`
-  wait timeout). Datagrams arriving during that gap are **lost**—UDP has no
-  retry unless your client adds one.
-- The counter restarts at 0 on every restart. If it must survive, persist it
-  (a `map`ed file on that host, or your own storage) — that is application
-  design.
-- Mixed versions run side by side during a roll. Keep the request/response
-  format backward compatible across one release, or drain completely first.
-- Keep at least one healthy node in the balancer at all times; roll one node,
-  check it, then the next.
+- `restart` sends SIGTERM; `echoctr`/`echoxx` exit within about one second
+  (their `far` wait timeout). Datagrams arriving in that gap are **lost**.
+- The counter restarts at 0; persisting it is application design.
+- While a roll is in progress, hosts briefly run different revisions. Keep the
+  request/response format backward compatible across one release, or drain
+  completely first. Re-run the step 9 identity check when the roll ends.
+- Keep at least one healthy node in the balancer at all times.
 
 ### 12. What the application owns vs what base provides
 
@@ -1100,7 +1216,7 @@ Facts that matter during a roll:
 | Health and failover | — | probes, removing dead nodes, paging a human |
 | Disks, backups, capacity | — | disk-full handling for `event.log`/trace files, backups, monitoring |
 | Network | — | firewalls, port allocation, DNS, TLS/auth if needed |
-| Deployment | — | artifact build, checksum, rolling procedure, rollback |
+| Deployment | — | keeping trees identical (clone/rsync/your orchestration), role assignment, rolling procedure, rollback |
 
 There is **no automatic HA, no clustering, no service discovery and no hosted
 offering** in base or the public units. They give you fast, small building
@@ -1115,9 +1231,11 @@ blocks; the multi-server behavior above is code and config you own.
 [ ] optional C++: echoxx/{makefile,UNIT.deps,echoxx.cc}; ldd shows libstdc++ plan
 [ ] HOME=$PWD make; units.mak lists echoctr; logs have no errors
 [ ] local ping/stats on two ports; SIGTERM logged in run/event.log
-[ ] release build with portable -march; tarball + SHA256SUMS + lock
-[ ] systemd user template per host, explicit SERVER_ID/PORT, linger enabled
-[ ] each node probed directly; identical sha256 on every host
+[ ] base commit + project.repos/lock + private.units recorded in your own repo
+[ ] echoctr/start-role.sh with your role names -> bin/start-role
+[ ] every host: same tree, same lock revs, same flags/toolchain; identity check matches
+[ ] systemd echorole@<role> per host (only that host's roles), linger enabled
+[ ] each node probed directly
 [ ] LB config you own; alternating replies through the LB
 [ ] health check + one-host-at-a-time roll-out + tested rollback
 ```
