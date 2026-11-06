@@ -471,9 +471,18 @@ Think in layers when you design a multi-process or multi-host service:
 | Request/event between programs or hosts | *(you write it, or use extended stack)* | `msg` + `addr` (+ `near` off-box) |
 | “Is mio messaging?” | **No.** mio = memory field representation | `msg` = message passing |
 
-Optional message-oriented hooks inside some memory tooling are a **private /
-extended** concern. The public `mio` unit is the structured memory printer and
-parser.
+**Registration (exact public API, not a message bus):** core `mio` exposes
+
+`MioRegisterHandler(Mtyp_t type, MioItemHandler input, MioItemHandler output)`
+
+(`mem_core.c` / `mem_io.h`). The `Mtyp_t` enum includes `MSGADDR`, but **MSGADDR
+has no built-in handler** in core mio—the header states you link a separate
+helper and call `MioMsgInit()` for message-address fields. That helper
+(`miomsg`) registers with
+`MioRegisterHandler(MSGADDR, in_msgaddr, out_msgaddr)`. There is **no**
+`mem_io_message_set` (or similar) API. Public starter `mio` is field print/parse
+plus this registration hook; wiring `MSGADDR` and the `msg`/`addr`/`near` plane
+remains an extended/private project choice via your own unit list.
 
 #### Obtaining `msg` / `addr` / `near`
 
