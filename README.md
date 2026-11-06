@@ -2058,9 +2058,208 @@ printf 'GET 1' | nc -u -w2 127.0.0.1 7300        # must answer OK with the old c
 - Back up your git remotes (full history; `repo fetch` makes full clones) and,
   separately, the state directory. A release directory is not a backup of the
   state.
-- A new release that changes `MerState_t` must bump `MER_VERSION` and
-  migrate the file deliberately. The old binary refuses a file it does not
-  recognise, and the new one refuses a wrong-size file; neither truncates it.
+- A new release that changes `MerState_t` must bump `MER_VERSION`, use a new
+  state file name, and migrate the data with P10. The old binary refuses a
+  file it does not recognise, and the new one refuses a wrong-size file;
+  neither truncates it.
+
+### P10. Changing the state layout: dump to a script, reload into a new file
+
+A restart can reuse the mapped state file only if its layout is unchanged.
+When the structure changes (a field added, moved, widened or removed), do
+**not** map the old file with the new program: `MapFile2Mem` resizes an
+existing file to the new size and the bytes are then read with the wrong
+layout. Instead, **dump the old state by field name with the old tool, edit
+that dump as a script, and load it with the new tool into a new file.**
+
+The tool is `mstate`, a small mio program in the same unit (`rules.mak`
+installs it as `bin/mstate`). Its output lines are themselves `mstate`
+commands, which is what makes the dump a reload script.
+
+`meridian/mstate.c`:
+
+```c
+/* mstate: print or set fields of the meridian state file by NAME (mio).
+ * Usage: mstate STATE_FILE [ Field.Name [ Value ] ]
+ * Output lines are themselves mstate commands, so a dump is a reload script.
+ *        mstate --create STATE_FILE   (new file with this layout's defaults)
+ * Refuses a file whose size is not sizeof( MerState_t ): never resizes. */
+#include	<meridian.h>
+#include	<map.h>
+#include	<mem_io.h>
+#include	<stdio.h>
+#include	<string.h>
+#include	<sys/stat.h>
+#include	<sys/mman.h>
+#include	<fcntl.h>
+#include	<unistd.h>
+
+#define	STRUCT	MerState_t
+static	Mitem	mstate_l[ ] = {
+	ITEM( HEXADECIMAL, u32, magic,         "file magic",            0, 0 ),
+	ITEM( UNSIGNED,    u32, version,       "layout version",        0, 0 ),
+	ITEM( UNSIGNED,    u32, generation,    "starts of mexec",       0, 0 ),
+	ITEM( UNSIGNED,    u32, last_reqid,    "last applied ADD id",   0, 0 ),
+	ITEM( SIGNED,      s32, last_count,    "count after last ADD",  0, 0 ),
+	{ SIGNED, 0, (u_t)&((STRUCT *)0)->count, sizeof( s32 ), 1,
+	  "count", "counter (atom_32)", 0, 0 },
+	{ 0 }
+};
+#undef	STRUCT
+
+int	main( int ac, char ** av )
+{
+	struct	stat	sb;
+	MerState_t *	st;
+	char		prefix[ 600 ];
+
+	if( ac == 3 && strcmp( av[ 1 ], "--create" ) == 0 ) {
+		MerState_t	d;
+		int		fd;
+		if( av[ 2 ][ 0 ] != '/' ) return( 2 );
+		memset( &d, 0, sizeof( d ) );
+		d.magic = MER_MAGIC;
+		d.version = MER_VERSION;
+		if( ( fd = open( av[ 2 ], O_WRONLY | O_CREAT | O_EXCL, 0600 ) ) < 0 ||
+		    write( fd, &d, sizeof( d ) ) != (ssize_t)sizeof( d ) || fsync( fd ) != 0 ) {
+			perror( av[ 2 ] );	/* O_EXCL: an existing file is never touched */
+			return( 1 );
+		}
+		close( fd );
+		return( 0 );
+	}
+	if( ac < 2 || ac > 4 ) {
+		fprintf( stderr, "usage: %s STATE_FILE [ Field.Name [ Value ] ]\n", av[ 0 ] );
+		return( 2 );
+	}
+	LocalName = "mstate";
+	if( av[ 1 ][ 0 ] != '/' ) {	/* map resolves relative names via MEMORY_PATH */
+		fprintf( stderr, "%s: give an absolute path\n", av[ 0 ] );
+		return( 2 );
+	}
+	if( stat( av[ 1 ], &sb ) != 0 || sb.st_size != (off_t)sizeof( MerState_t ) ) {
+		fprintf( stderr, "%s: %s missing or not %u bytes; not touching it\n",
+			 av[ 0 ], av[ 1 ], (unsigned)sizeof( MerState_t ) );
+		return( 1 );
+	}
+	if( ( st = (MerState_t *)MapFile2Mem( av[ 1 ], sizeof( MerState_t ), PROT_WRITE ) ) == NULL )
+		return( 1 );
+	snprintf( prefix, sizeof( prefix ), "mstate %s", av[ 1 ] );
+	if( ac == 4 ) {
+		Input_Memory_Item( st, mstate_l, av[ 2 ], av[ 3 ] );
+		msync( st, sizeof( *st ), MS_SYNC );
+	}
+	Output_Memory_Item( st, mstate_l, ac >= 3 ? av[ 2 ] : NULL, prefix );
+	UnmapAddress( st, 1 );
+	return( 0 );
+}
+```
+
+```text
+$ mstate /home/svc/.local/state/meridian/meridian.state
+mstate /home/svc/.local/state/meridian/meridian.state magic         0x4D455231
+mstate /home/svc/.local/state/meridian/meridian.state version       1
+mstate /home/svc/.local/state/meridian/meridian.state generation    5
+mstate /home/svc/.local/state/meridian/meridian.state last_reqid    23
+mstate /home/svc/.local/state/meridian/meridian.state last_count    +18
+mstate /home/svc/.local/state/meridian/meridian.state count         +18
+```
+
+Things about mio and map, learned from the source and tests, that the
+procedure guards against:
+
+- **Use absolute paths.** `Map` resolves a name that does not start with `/`
+  or `.` under `$MEMORY_PATH`. In testing, a relative name silently created a
+  second, empty file elsewhere. `mstate` refuses relative paths.
+- **No size or schema check in mio itself.** `mstate` checks the file size and
+  never creates a file except with `--create` (`O_EXCL`).
+- **`Input_Memory_Item` does not report bad input.** An unknown field name
+  prints nothing and the exit status is still 0. A non-numeric value stored
+  **0**. So check every loaded value afterwards (step 6 below).
+- Generic `*mem` tools in the units (`tpmem`, and `near`'s
+  `nearmem BOX [ Name [ Value ] ]`, which maps `near_BOX.mem` with
+  `Near_Map(box, 1)` = `MapFile2Mem`) **create or resize** the file to their
+  own compiled size. Never point a newer-layout tool at an older file. The same
+  dump-and-reload method applies to them (`nearmem BOX > dump`), but `nearmem`
+  itself is not buildable from published sources today (see P2).
+
+Example: release 2 moves `count`, widens `last_count` to `s64`, and adds
+`u32 limit` (default 1000). `MER_VERSION` becomes 2, and its `mstate` lists
+the new fields:
+
+```c
+typedef	struct	{
+	u32	magic;
+	u32	version;
+	atom_32	count;			/* moved */
+	u32	generation;
+	s64	last_count;		/* widened from s32 */
+	u32	last_reqid;
+	u32	limit;			/* new in version 2 */
+}	MerState_t;
+/* mstate_l: ITEM( SIGNED, s64, last_count, … ), ITEM( UNSIGNED, u32, limit, … ) */
+```
+
+The mexec in release 2 must use a **new file name**, for example
+`meridian.v2.state`, so it can never map the version 1 file.
+
+Procedure (`OLD`/`NEW` are the old and new release trees, `S` the state
+directory). This was tested with a version 2 build of `mstate`; the service
+stop/start lines are the systemd commands from P6:
+
+```sh
+OLD=/srv/meridian/releases/<v1>; NEW=/srv/meridian/releases/<v2>; S=$HOME/.local/state/meridian
+# 1. quiesce: stop the edge first (no new work), then the executor
+systemctl --user stop meridian@medge meridian@mexec
+# 2. keep the old file untouched, with a checksummed copy
+cp -p $S/meridian.state $S/meridian.state.v1.bak && sha256sum $S/meridian.state*
+# 3. dump with the OLD tool
+$OLD/bin/mstate $S/meridian.state > $S/dump.v1
+# 4. turn it into a v2 script: new tool, new file; drop magic/version (set by --create)
+awk -v t="$NEW/bin/mstate" -v f="$S/meridian.v2.state" \
+    '$3=="magic"||$3=="version"{next} {print t, f, $3, $4}' $S/dump.v1 > $S/load.v2
+echo "$NEW/bin/mstate $S/meridian.v2.state limit 1000" >> $S/load.v2
+#    review load.v2 by hand: every new field gets a value, every dropped field
+#    is removed on purpose, every changed meaning gets a converted value
+# 5. create the new file and load it
+$NEW/bin/mstate --create $S/meridian.v2.state
+bash $S/load.v2 > /dev/null
+# 6. verify each line was really applied (mio does not report errors)
+while read -r tool file name value; do
+	got=$($NEW/bin/mstate "$file" "$name" | awk '{print $4}')
+	[ "$got" = "$value" ] || echo "MISMATCH $name: want $value got $got"
+done < $S/load.v2
+# 7. switch the release symlink (P8) and start: executor first, then the edge
+systemctl --user start meridian@mexec meridian@medge
+```
+
+Test result: the dump `generation 5, last_reqid 23, last_count +18,
+count +18` loaded into the v2 file with `limit 1000`, and all five lines
+checked `ok`. A value of 3000000000 then fitted in the widened `last_count`.
+An earlier run where the tool was not on `PATH` printed five `MISMATCH`
+lines, which is exactly what step 6 is for. The v2 tool refused the v1 file
+("not 32 bytes"), and the v1 file's checksum was unchanged.
+
+Rules that keep this safe:
+
+- **Rollback** is the old release plus the untouched `meridian.state` (and
+  its `.bak`). Never delete or overwrite the old file during the upgrade.
+- **Field names, not offsets**, carry the data, so moving fields is safe. A
+  widened type is safe; a narrowed one needs a range check you do by hand. A
+  field whose meaning changed needs a converted value, not a copy.
+- **Arrays:** mio prints array elements, and their count is fixed by the
+  struct. Changing an array size needs the same manual review.
+- **msg queues:** do not upgrade while messages are queued. Step 1 stops the
+  edge before the executor so nothing new arrives. The msg buffer file
+  (`.mem`, 2100 slots of 1024 bytes) is msg's own layout and is not migrated by
+  this procedure.
+- **Portability:** a mapped file is raw memory of one ABI (here `linux-x86_64`,
+  little-endian, the same compiler packing). Do not copy state files between
+  different architectures. Use the text dump to move state, and only between
+  matching field sets. C and C++ programs share the layout because both call
+  the same C library and headers.
+- There is no automatic migration tool in base or the units. The field list,
+  defaults and conversions are your application's decisions.
 
 ### P9. Security limits of this example
 
