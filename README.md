@@ -1049,6 +1049,8 @@ cat > ~/.config/systemd/user/echorole@.service <<'EOF'
 [Unit]
 Description=echoproj role %i
 After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -1058,7 +1060,7 @@ WorkingDirectory=%h/echoproj/run
 ExecStart=%h/echoproj/bin/start-role %i
 KillSignal=SIGTERM
 TimeoutStopSec=5
-Restart=on-failure
+Restart=always
 RestartSec=2
 
 [Install]
@@ -1084,14 +1086,53 @@ tail -n 20 ~/echoproj/run/event.log
 Moving a role to another host is `disable --now` on one and `enable --now`
 on the other—no rebuild, because every host already has every executable.
 
+#### 9c. Failure model: die and be respawned
+
+This project assumes a **fail-fast** process model: when a server process hits
+a fault it cannot fully recover from, it **exits** (non-zero), and the
+supervisor—`systemd` here, or init/your equivalent—**starts it again**. It does
+not limp on, hang, or try to repair itself in place.
+
+What that means for the template above:
+
+| Setting | Why |
+|---|---|
+| `Restart=always` | respawn after any exit, crash or signal death. A deliberate `systemctl --user stop`/`disable --now` is **not** restarted, so a clean operator stop stays stopped. (A stray `kill -TERM` outside systemctl *is* restarted—echoctr exits 0 on SIGTERM.) `Restart=on-failure` is the alternative if you want a clean exit 0 to mean "stay down"; this tutorial uses `always`. |
+| `RestartSec=2` | short pause so a respawn loop does not spin |
+| `StartLimitIntervalSec=60` + `StartLimitBurst=5` (in `[Unit]`) | more than 5 starts in 60 s → systemd gives up and marks the unit failed. A bad config, taken port or missing file then **stops** instead of restarting forever; that failed state is what your monitoring alerts on. Clear with `systemctl --user reset-failed echorole@server-1` after fixing. |
+| `Type=simple` + `exec` in `start-role` | `exec` replaces the shell with the server, so systemd tracks the **real** server PID and `KillSignal=SIGTERM` reaches it directly. Without `exec`, the signal goes to a shell and the server can be orphaned or SIGKILLed. Keep one supervisor: do not also background or loop-restart inside the script. |
+| `KillSignal=SIGTERM`, `TimeoutStopSec=5` | graceful stop; echoctr notices SIGTERM within ~1 s (its 1000 ms `far` wait), logs and exits. After 5 s systemd sends SIGKILL. |
+
+Writing servers for this model:
+
+- On an unrecoverable error, log it (`EventLog`, which appends a line to
+  `$ELOG_FILE`) and **exit non-zero**—as `echoctr` does on a failed
+  `socket`/`bind` (`return 1`). Do not swallow it (no catch-all that keeps a
+  broken process running, in C or C++).
+- Bound every wait. `File_Test_For_Read_Data` takes a timeout; use one, and
+  treat "stuck for too long" as a fault that ends the process. Detecting a
+  process that hangs without exiting needs a watchdog **you** add (for example
+  systemd's `WatchdogSec=` with your own `sd_notify` calls, or an external
+  health check that restarts the unit); nothing in the public units provides it.
+- Expect to start fresh. Process memory is gone after a respawn. Rebuild state
+  at startup from something durable you own (a file, a database, a `map`ped
+  file on that host), and remember a mapped file may hold a half-finished
+  update if the process died mid-write.
+- Open the listening socket early and fail fast if it cannot bind; a restart
+  then either serves within seconds or trips the start limit.
+
+This is **process** recovery on the same host. A dead **machine** is a
+different event, handled by moving the role (step 11a).
+
 #### 9b. Foreground alternative (no systemd)
 
 ```sh
 cd ~/echoproj && HOME=$PWD ./bin/start-role server-1
 ```
 
-Run it under `tmux`/`screen` or your own supervisor. Without a supervisor
-nothing restarts it after a crash or reboot—that is your decision.
+Run it under `tmux`/`screen` or your own supervisor (init, runit, s6, …).
+The failure model in 9c assumes **some** supervisor respawns the process;
+without one nothing restarts it after a fault or reboot.
 
 ### 10. Multi-server topology and the load balancer
 
@@ -1217,7 +1258,7 @@ Two different failures:
 
 | Failure | Who handles it | What happens |
 |---|---|---|
-| The **process** dies (crash, kill) | `systemd` on the same host (`Restart=on-failure` in `echorole@.service`) | restarted in place after `RestartSec=2`; same host, same port |
+| The **process** dies (fault → exit, crash, kill) | `systemd` on the same host (`Restart=always`, step 9c) | respawned in place after `RestartSec=2`; same host, same port; gives up after 5 starts in 60 s |
 | The **machine** dies (power, kernel, network) | **you** (or your own failover tooling) | start the same role on another host and point traffic there |
 
 #### Plan the spare before you need it
