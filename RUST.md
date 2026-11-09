@@ -14,6 +14,7 @@ dropped into any unit builds and installs with plain `make`, just like
 | `.c.s` (`-S`) | `.rs.s` (`--emit=asm`) | rules.mak |
 | `.c.i` (`-P`, preprocess) | none: the Rust equivalent (`-Zunpretty=expanded`) works only on nightly rustc | |
 | none | `.rs.ll` (`--emit=llvm-ir`), and `.rs.so` (a cdylib `foo.so` with the runtime inside, for C) | rules.mak |
+| a handwritten `foo.h` | `make foo.h`: `$(CBINDGEN) $(CBINDGEN_FLAGS)` (`--lang c --cpp-compat`) writes the C header of `foo.rs`. Manual only, never in a build phase (see "C header from Rust") | rules.mak |
 | `C_SRCS` (`main(`), `L_C_SRCS` | `RS_SRCS` (`fn main`), `L_RS_SRCS` | rules.mak |
 | `ifneq L_OBJS` → `LIBRARY := $(LIB)/lib$(UNIT).a`, `.PRECIOUS` | `ifneq L_RS_SRCS` → `RS_LIBRARY := $(LIB)/lib$(RS_CRATE).rlib`, `.PRECIOUS` | rules.mak |
 | `$(OBJS:.o=)` in `EXECUTABLES`, `PRODUCTS`; sources in `SOURCE` | `$(RS_SRCS:.rs=)`, the same lists | rules.mak |
@@ -98,6 +99,31 @@ pub extern "C" fn foo_add(a: i32, b: i32) -> i32 { a + b }
   `make foo.so`.
 - **Reading `foo.s`**: rustc writes DWARF 5 `.file` lines, so assemble it
   with `as --gdwarf-5` or `gcc -c -Wa,--gdwarf-5`.
+
+## C header from Rust
+
+`make foo.h` runs cbindgen on `foo.rs` and writes `foo.h`, with a `FOO_H`
+include guard, `extern "C"` for C++ (`--cpp-compat`), the
+`#[repr(C)]` structs and enums, and every `#[no_mangle] pub extern "C"`
+function. Run it by hand while developing, after editing `foo.rs`.
+
+- **Manual only.** `foo.h` is a target only when it is named on the command
+  line (`RS_HDRS` is filtered by `MAKECMDGOALS`). `all`, `header`,
+  `library`, `product`, `-j`, and `clean` never build, rebuild, or delete a
+  `.h` from a `.rs`. It is not a `.rs.h` suffix rule, because a suffix rule
+  would also apply to `~/cmn/foo.h` from the bindgen `~/cmn/foo.rs` (a cycle)
+  and to any handwritten `foo.h` older than its `foo.rs`.
+- **Overwrite safety.** The rule writes a `foo.h.cbindgen` marker. It
+  overwrites an existing `foo.h` only when that marker is present, so
+  `make bar.h` stops with an error rather than replace a handwritten `bar.h`.
+- **After that, `foo.h` is an ordinary `.h`.** Commit it (with
+  `foo.h.cbindgen` if `make foo.h` should keep regenerating it), include it from C,
+  and list `$(HDR)/foo.h` in `CHDRS` to install it. bindgen then makes
+  `~/cmn/foo.rs` from it like any other header (on a box whose libclang lacks
+  its own headers, run
+  `make RS_BINDGEN_CFLAGS=-I$(gcc -print-file-name=include)` for `stdarg.h`).
+- cbindgen comes from `cargo install cbindgen` (`~/.cargo/bin`). Without it,
+  `make foo.h` stops with an error and nothing else changes.
 
 Rust can call only the C ABI. To use C++ code, export `extern "C"` wrappers
 from the C++ side and add `SYS_LIBS += -lstdc++`.

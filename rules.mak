@@ -109,6 +109,8 @@ RS_BINDGEN ?=	auto
 BINDGEN ?=	$(shell PATH="$(HOME)/.cargo/bin:$$PATH" command -v bindgen 2>/dev/null)
 BINDGEN_FLAGS =
 RS_BINDGEN_CFLAGS =
+CBINDGEN ?=	$(shell PATH="$(HOME)/.cargo/bin:$$PATH" command -v cbindgen 2>/dev/null)
+CBINDGEN_FLAGS = --lang c --cpp-compat
 
 #
 #	Common Rules
@@ -164,6 +166,24 @@ RS_BINDGEN_CFLAGS =
 .rs.so:
 	$(RUSTC) -o $@ --crate-type=cdylib -C panic=abort --emit=link,dep-info=$*.d $(RSFLAGS) $< ;
 	@cat *.d > .depend ;
+
+#
+#	foo.h from foo.rs (cbindgen), the C header of a Rust .o/.a/.so.  Manual
+#	only: foo.h is a target just when named on the command line (make foo.h),
+#	never in all/header/library/product, so a plain make never builds or
+#	rebuilds a .h from a .rs, and never matches $(HDR)/foo.h (no cycle with
+#	bindgen).  Not a .rs.h suffix rule for that reason.  An existing foo.h is
+#	overwritten only with its foo.h.cbindgen marker; once made, foo.h is an
+#	ordinary .h (commit it, list it in CHDRS).
+#
+
+RS_HDRS :=	$(filter $(MAKECMDGOALS),$(patsubst %.rs,%.h,$(wildcard *.rs)))
+
+$(RS_HDRS):	%.h :	%.rs
+	@test -n "$(CBINDGEN)" || { echo "error: cbindgen not found (cargo install cbindgen) for $@" >&2 ; exit 1 ; }
+	@if [ -f $@ ] && [ ! -f $@.cbindgen ]; then echo "error: $@ is handwritten (no $@.cbindgen), not overwritten" >&2; exit 1; fi
+	$(CBINDGEN) $(CBINDGEN_FLAGS) -o $@.tmp $< || { rm -f $@.tmp ; exit 1 ; }
+	@touch $@.cbindgen ; g=`echo $(*F)_H | tr a-z.- A-Z__` ; { echo "#ifndef $$g" ; echo "#define $$g" ; cat $@.tmp ; echo "#endif" ; } > $@ ; rm -f $@.tmp
 
 $(LIB)/librs_std.a:
 	@-mkdir -p -m 775 $(LIB) ;
