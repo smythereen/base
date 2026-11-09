@@ -126,10 +126,11 @@ Run `make [target]` inside a unit, or from the root for all units. With no targe
 
 | Target | What it does in one unit |
 |---|---|
-| `all` (default) | `.depend source header library product`, in that order |
+| `all` (default) | `.depend source`, then `header` → `bindings` → `library` → `product` |
 | `source` | Builds `SRC_ADD` (extra generated sources), if any, and reports completion |
 | `source_list` | Does nothing but report completion. It exists so the root `source_list` phase finds the target in every unit |
 | `header` | Copies each file in `CHDRS` to `~/cmn` with `cp -fp` when it is newer |
+| `bindings` | Optional: generate `~/cmn/*.rs` from installed `*.h` (`RS_BINDGEN=auto|off|required`). `*.def` in `CHDRS` are installed but are not bindgen roots |
 | `library` | Compiles the library sources and adds them to `~/lib/lib<unit>.a` with `ar -rUs`. The previous library is first saved in `~/lib/.old` |
 | `product` | Builds every program in the unit directory (linking the unit library and `LIBRARIES`), and installs it in `~/bin`. The previous copy is moved to `~/bin/.old`. Installs scripts and web files too |
 | `cleanup` / `clean` | The same rule under two names. Deletes `*.o *.a *.d *.tmp core.*` and the built programs in the unit directory, deletes the unit's exported headers from `~/cmn`, moves its installed programs to `~/bin/.old` and its library to `~/lib/.old`, and empties `.depend`. It does not delete anything for good |
@@ -138,14 +139,14 @@ Run `make [target]` inside a unit, or from the root for all units. With no targe
 Every target prints `Unit <name>: <target> complete!` when it finishes, even when the commands before it
 ignored an error (see section 10).
 
-**Running them from the root.** The master `makefile` has `all: header library product`. Each phase runs over
+**Running them from the root.** The master `makefile` has `all: header bindings library product`. Each phase runs over
 **all units** before the next phase starts, so the order is: every unit's `header`, then every unit's
-`library`, then every unit's `product`. This is what lets units depend on each other's headers and
+`bindings`, then `library`, then `product`. This is what lets units depend on each other's headers and
 libraries (even circularly, as `sys`, `map`, `sem` and `far` do) with no ordering between units: all
 headers are in `~/cmn` before any compile, and all libraries exist before any program links.
 
-The root also runs `header`, `library`, `product`, `cleanup`, `clean`, `source_list` and `dist_clean`
-across the units. A unit whose makefile is not a standard unit makefile must still answer these phases;
+The root also runs `header`, `bindings`, `library`, `product`, `cleanup`, `clean`, `source_list` and `dist_clean`
+across the units. Per-unit logs go under `log/<phase>/<unit>.log`; combined `<phase>.log` stays in the project root. A unit whose makefile is not a standard unit makefile must still answer these phases;
 the cheap way is a **dummy (no-op) target** that only prints `Unit <name>: <target> complete!`, as
 `source_list` does in `targets.mak`. A unit that really uses the unit system (`c-saw`, `load-saw`) needs none. For each one, it does `make -C <unit> -S <target>` and writes the output to
 `<target>.log` in the root (`header.log`, `library.log`, `product.log`, `cleanup.log`).
@@ -242,7 +243,7 @@ their own extra targets: `make -C c-saw test` (also `test-far`), `make -C load-s
 
 - **The root build keeps going on purpose.** With hundreds or thousands of units you want one quick build that
   shows which units are good and which are bad, not a `make` that stops at the first error. So the root
-  `make` always exits 0, and each phase writes `<target>.log` (`header.log`, `library.log`, `product.log`,
+  `make` always exits 0, and each phase writes `<target>.log` (`header.log`, `bindings.log`, `library.log`, `product.log`,
   `cleanup.log`) in the root. **Scan the logs** after a build:
   `grep -n 'warning:\|error:\|\*\*\*' *.log`. The plain words "warn" and "error" also match file names such as
   `syserror.c` and `syswarn.c`, so the patterns above are more precise. A failing unit shows the compiler

@@ -51,9 +51,12 @@ Convention:
 programs; other `.c`/`.cc` go into the library. You do not list object files.
 
 Each unit builds with its own makefile. The root makefile runs phases across
-selected units: **header → library → product**. For each unit it runs
+selected units: **header → bindings → library → product**. For each unit it runs
 `make -C <unit> -S <target>` and keeps going to the next unit so one pass shows
-good and bad units. Logs land in `header.log`, `library.log`, `product.log`.
+good and bad units. Combined logs land in `header.log`, `bindings.log`,
+`library.log`, `product.log`; each unit also gets `log/<phase>/<unit>.log`.
+Rust is optional (`RS_BINDGEN=auto`: generate `~/cmn/*.rs` when `bindgen` is
+available; otherwise C-only builds succeed). See `RUST.md`.
 
 `UNITS.md` is the longer make-system guide shipped in this repo.
 
@@ -66,13 +69,30 @@ Base is only the **project shell**:
 | `BASE` | Marker (`base-format: 1`); tools refuse trees without it |
 | `makefile` | Master build + project populate/fetch/units.mak restart |
 | `rules.mak` / `targets.mak` | Shared compile/install rules |
-| `base.units` | Units that ship inside base (**only `repo`**) |
+| `base.units` | Units that ship inside base (`repo`, `bin`) |
 | `repo/` | Shell tools: `repo.sh`, `fetch-units.sh`, add/remove/list/… |
-| `bin/` `cmn/` `lib/` `hlp/` `run/` `tmp/` | Empty install dirs (`.gitkeep`) |
+| `bin/` | Helpers unit: `bindgen-header`, `rust-unit-lib-root`, `profile_add` |
+| `cmn/` `lib/` `hlp/` `log/` `run/` `tmp/` | Install / log dirs (`.gitkeep` where empty) |
+| `RUST.md` | Optional Rust / bindgen make integration |
 | `project.repos.example` / `private.units.example` / `env.example` | Templates |
 
 `sys` and `atomic` are **not** in base; they are on the starter list and are
 fetched before compile.
+
+## Project-per-login model
+
+Each project is its own login: **ROOT = `$HOME`**. Bootstrap is: clone base into
+the new login's home, run `bin/profile_add` (writes a complete `~/.bash_profile`),
+re-login, then `make`. `profile_add` sets `PATH` (`$HOME/bin`, `$HOME/.cargo/bin`),
+`LD_LIBRARY_PATH` (`$HOME/lib`), and the runtime env vars units read via `getenv`
+/ `File_Path` (`MEMORY_PATH`, `FILE_PATH`, `ELOG_FILE`, `DATA_PATH`, `PIPE_PATH`,
+`DATABASE_DIR`, optional `MEMORY_ALL` / `TraceLevel`).
+
+Historically **dev1** is the 24/7 production login; **dev2..devN** are
+test/development logins on one or many systems. A project's msg group number
+comes from looking up the login's user name in the `addr.mem` group table, so
+projects can message each other.
+
 
 ### Project list and lock (read these carefully)
 
@@ -109,7 +129,7 @@ With `REPO_AUTO` left at `yes` (default):
    (starter list from `$PROJECT_WORKER_URL`).
 2. `repo add` each asked-for unit (and transitive `require`s).
 3. When the lock is stale → `repo fetch --no-update`.
-4. Write `units.mak`, restart make, then `header` / `library` / `product`
+4. Write `units.mak`, restart make, then `header` / `bindings` / `library` / `product`
    (full rebuild if `.built` is missing or stale).
 
 ```sh
@@ -804,7 +824,7 @@ What that one `make` did:
    `UNITS changed, run: source ~/.bash_profile`, re-source your profile so
    the shell's `UNITS` matches.
 3. No `.built` yet (or `.rebuild-needed` newer) → **full rebuild**:
-   `cleanup`, then `header` (headers → `~/cmn`, `atomic` first), `library`
+   `cleanup`, then `header` (headers → `~/cmn`, `atomic` first), `bindings`, `library`
    (`~/lib/lib*.a`), `product` (`~/bin`). On success it writes `.built` and
    runs `repo rebuilt`.
 

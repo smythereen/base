@@ -8,16 +8,17 @@
 ## Where:	Target is one of the following (the default is all):
 ##
 ##      		all		(the default) make sure the project is populated and its
-##      				units are fetched, then header, library and product over
-##      				all units; see "The project" below
+##      				units are fetched, then header, bindings, library and
+##      				product over all units; see "The project" below
 ##      		header		copy each unit's exported headers to ~/cmn
+##      		bindings	generate ~/cmn/*.rs from installed headers (after all headers)
 ##      		library		build each unit's library into ~/lib
 ##      		product		build each unit's programs and install them in ~/bin
 ##      		cleanup, clean	delete built files, move installed files to .old
 ##      		dist_clean	cleanup, then delete the installed products and
 ##      				empty cmn, lib, tmp and the run files
 ##      		source_list	no-op, accepted by every unit
-##      		dir		create bin cmn hlp lib run tmp and the unit directories
+##      		dir		create bin cmn hlp lib log run tmp and the unit directories
 ##      		help		print this text
 ##      	fetch		clone the units in the repo list (project.repos in this directory), and
 ##      			the units they need, with repo/fetch-units.sh; public units come from the
@@ -68,9 +69,16 @@
 ##      	units before the next one starts.
 ##
 ## The phases deliberately keep going when a unit fails, and the exit status
-## is 0, so one build shows all the good and bad units.  The output of each
-## target is written to <target>.log in this directory (header.log,
-## library.log, product.log ...).  Scan the logs for "warn" and "error".
+## is 0, so one build shows all the good and bad units.  Do not treat that
+## exit status as a build-health signal; scan the logs for "warn" and "error".
+##
+##      		Per phase, a combined <phase>.log (header.log, bindings.log,
+##      		library.log, product.log) is written in this directory and
+##      		mirrored to the console.  Each unit also gets a fresh
+##      		log/<phase>/<unit>.log (stdout+stderr) truncated at that
+##      		unit's invocation.  log/ is a standard project directory
+##      		(with bin cmn hlp lib run tmp).  Ordinary clean does not
+##      		delete logs; dist_clean removes only root *.log, not log/.
 ##
 ## Note: The newunit/populate/update targets use the modern Git project tools
 ## (proj / project-*) when available in ~/bin (the main project bin, populated
@@ -80,7 +88,7 @@
 ##
 ## Examples:	make
 ##		make cleanup
-##		make header library "UNITS=map mio"
+##		make header bindings library "UNITS=map mio"
 ##
 
 #
@@ -130,6 +138,7 @@ OTHER =	bin	\
 	cmn	\
 	hlp	\
 	lib	\
+	log	\
 	run	\
 	tmp
 
@@ -192,9 +201,9 @@ all:	$(UNITS_MAK)
 	elif [ -f $(MARKER) ] && [ $(MARKER) -nt $(BUILT) ]; then full="$(MARKER) is newer than $(BUILT): unit versions changed"; \
 	elif [ "$$(cksum < $(PROJ_LOCK))" != "$$(cat $(BUILT))" ]; then full="the units changed ($(PROJ_LOCK) differs from the last full build)"; fi; \
 	if [ -n "$$full" ]; then echo "== FULL REBUILD: $$full"; $(MAKE) --no-print-directory cleanup; fi; \
-	$(MAKE) --no-print-directory header library product; \
+	$(MAKE) --no-print-directory header bindings library product; \
 	if [ -n "$$full" ]; then \
-		if grep -q -E 'error:|\*\*\* |Error [0-9]' header.log library.log product.log 2>/dev/null; then \
+		if grep -q -E 'error:|\*\*\* |Error [0-9]' header.log bindings.log library.log product.log 2>/dev/null; then \
 			echo "== the full rebuild had errors (see the *.log files): the next make does it again"; \
 		else \
 			cksum < $(PROJ_LOCK) > $(BUILT); $(REPO) rebuilt; \
@@ -203,9 +212,15 @@ all:	$(UNITS_MAK)
 
 else
 
-all:	header library product
+all:	header bindings library product
 
 endif
+
+# Standalone bindings always refresh headers first so common.h etc. exist.
+.PHONY:	bindings
+bindings: header
+	@$(MAKE) --no-print-directory bindings_units
+
 
 units:
 	@echo $(UNITS)
@@ -214,12 +229,36 @@ help:
 	@-tput clear
 	@-cat makefile | grep "##" | grep -v "###" | cut -c3- | more
 
-header library product cleanup clean source_list dist_clean::
-	@-for unit in $(UNITS) ;\
+header bindings_units library product cleanup clean source_list dist_clean::
+	@tgt="$(@)"; log="$(@).log"; utgt="$(@)"; perunit=0; \
+	if [ "$(@)" = "bindings_units" ]; then tgt="bindings"; log="bindings.log"; utgt="bindings"; fi; \
+	case "$${utgt}" in header|bindings|library|product) perunit=1 ;; esac; \
+	if [ "$$perunit" -eq 1 ]; then \
+		mkdir -p "log/$${tgt}" || echo "error: cannot mkdir log/$${tgt}" >&2; \
+	fi; \
+	: > "$${log}" || echo "error: cannot truncate $${log}" >&2; \
+	for unit in $(UNITS) ; \
 	do \
-		echo	"	make -C $${unit}  $(@)" ;\
-		make	-C $${unit} -S $(@) ;\
-	done 2>&1 | tee $(@).log 
+		echo	"	make -C $${unit}  $${utgt}" | tee -a "$${log}" || echo "error: log write failed (banner) $${unit}" >&2; \
+		usafe=`printf '%s' "$${unit}" | tr '/' '_'`; \
+		if [ "$$perunit" -eq 1 ]; then \
+			ulog="log/$${tgt}/$${usafe}.log"; \
+			: > "$${ulog}" || echo "error: cannot truncate $${ulog}" >&2; \
+			make -C "$${unit}" -S "$${utgt}" 2>&1 | tee -a "$${ulog}" | tee -a "$${log}" \
+				|| echo "error: log write failed for unit $${unit} phase $${utgt}" >&2; \
+		else \
+			make -C "$${unit}" -S "$${utgt}" 2>&1 | tee -a "$${log}" \
+				|| echo "error: log write failed for unit $${unit} phase $${utgt}" >&2; \
+		fi; \
+	done; \
+	if [ "$${utgt}" = "bindings" ]; then \
+	  fails=`grep -c "bindgen failed" $${log} 2>/dev/null || true` ; \
+	  errs=`grep -c "make\[1\]: \*\*\*" $${log} 2>/dev/null || true` ; \
+	  miss=`grep -c "warning: bindings: missing" $${log} 2>/dev/null || true` ; \
+	  echo "	bindings summary: bindgen_failed=$$fails missing_rs_warnings=$$miss make_errors=$$errs (see $${log})" ; \
+	  echo "BINDINGS_PHASE_STATUS bindgen_failed=$$fails missing_rs_warnings=$$miss make_errors=$$errs" ; \
+	fi; \
+	true
 
 source_rpm:
 	@-for F in $(SOURCE); do echo "`pwd`/$${F}"  ; done > rpm/source.list
@@ -250,7 +289,7 @@ dist_clean::
 	@-rm	-f	run/*.txt	;
 	@-rm	-rf	run/pipes/*	;
 	@-rm	-rf	tmp/*		;
-	@-rm	-f	*.log		;
+	@-rm	-f	*.log		; # root phase logs only; keep log/ tree
 	@-find	.	-name "core.*" -exec rm -f {} \; ;
 	@-find	tmp	-type f -exec rm -f {} \; ;
 

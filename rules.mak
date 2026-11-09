@@ -91,12 +91,74 @@ NO_UNIT_SO	:= yes
 
 LDFLAGS =	-L$(LIB)
 
+
+#
+#	Rust (optional)
+#
+#	Units list crate roots explicitly between include ../rules.mak and
+#	include ../targets.mak. Nested modules are NOT crate roots; list them
+#	in RS_EXTRA_SRCS if copy_to_* should carry them. See ~/RUST.md.
+#
+#	RS_EXES        optional explicit crate-root .rs executables (far-style:
+#	               top-level *.rs with fn main are auto-discovered; see RS_AUTO_EXES)
+#	RS_AUTO_EXES   yes (default) | no — auto-pick top-level *.rs containing fn main
+#	RS_NO_EXES     extra .rs basenames to exclude from auto-exe discovery
+#	RS_STATICLIBS  crate-root .rs files -> libNAME.a  (--crate-type=staticlib, C ABI)
+#	RS_RLIBS       crate-root .rs files -> libNAME.rlib (Rust-only)
+#	RS_CDYLIBS     crate-root .rs files -> libNAME.so (--crate-type=cdylib)
+#	RS_OBJS        crate-root .rs files -> NAME.o (--emit=obj); final link must
+#	               still supply the Rust runtime (prefer linking with rustc)
+#	RS_EXTRA_SRCS  extra .rs modules for SOURCE/copy lists (also excluded from auto-exe)
+#	RS_AUTO_LIB    yes (default) | no — auto-build lib<crate>.rlib from non-main .rs
+#	RS_NO_LIB      .rs files excluded from auto unit-library membership
+#	RS_EXTERN      other unit/crate names this unit links via --extern (see RUST.md)
+#	RSFLAGS        extra rustc flags
+#	RS_SYS_LIBS    extra native linker args for Rust links (e.g. -lstdc++)
+#	RS_NATIVE_LIBS native libs C/C++ needs when linking a Rust staticlib
+#
+#	Rust cannot call arbitrary C++ ABI symbols. Export extern "C" wrappers
+#	from C/C++ (or use a C API) and declare them in Rust with extern "C".
+#	Per-header bindgen (optional): after headers are copied into $(HDR)/cmn,
+#	each installed foo.h can produce foo.rs. See ~/RUST.md (RS_BINDGEN).
+#	Generated cmn/*.rs files are NOT crate roots.
+#
+
+RUSTC ?=	rustc
+RSFLAGS ?=
+RS_EXES ?=
+RS_AUTO_EXES ?=	yes
+RS_NO_EXES ?=
+RS_STATICLIBS ?=
+RS_RLIBS ?=
+RS_CDYLIBS ?=
+RS_OBJS ?=
+RS_EXTRA_SRCS ?=
+RS_AUTO_LIB ?=	yes
+RS_NO_LIB ?=
+RS_EXTERN ?=
+RS_UNIT_LIB_ROOT_SH ?=	$(HOME)/bin/rust-unit-lib-root
+RS_SYS_LIBS ?=
+RS_NATIVE_LIBS ?=	-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+
+# auto (default): generate when bindgen is available; otherwise C-only headers succeed
+# off: never generate   required: fail if bindgen missing or generation fails
+RS_BINDGEN ?=	auto
+BINDGEN ?=	$(shell PATH="$(HOME)/.cargo/bin:$$PATH" command -v bindgen 2>/dev/null)
+# HAVE_BINDGEN is computed in targets.mak after unit/cmdline BINDGEN overrides.
+BINDGEN_FLAGS ?=
+# Clang args for bindgen. Include $(HDR) and the unit dir (.) so public
+# header fragments (*.def enums/structs) resolve like the C compile, whether
+# found via installed ~/cmn or still source-local in the unit.
+BINDGEN_CFLAGS ?=	$(INCLUDES) -I. $(RS_BINDGEN_CFLAGS)
+RS_BINDGEN_CFLAGS ?=
+BINDGEN_HEADER ?=	$(HOME)/bin/bindgen-header
+
 #
 #	Common Rules
 #
 
 .SUFFIXES:
-.SUFFIXES:	.so .a .o .s .i .c .cc .cxx .h .hxx .dat .class
+.SUFFIXES:	.so .a .o .s .i .c .cc .cxx .rs .h .hxx .dat .class .rlib
 
 .cxx.a:
 	$(CXX) -o $* -c -MD $(CXXFLAGS) $< ;
