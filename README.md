@@ -95,7 +95,10 @@ C implementation rule for rule:
    Each C compile-only rule (`.c.o`, `.c.a`, `.c.s`, `.c.i`) gets a
    no-dependency counterpart where the language has one, so C units can link
    the language's objects directly (Rust: `.rs.o`, `.rs.a`, `.rs.s`). These
-   rules are opt-in and never change default discovery.
+   rules are opt-in and never change default discovery. A language that can
+   write a C header for its objects gets a suffix rule for that too (Rust:
+   `.rs.h`, via cbindgen), so the header and the C that includes it rebuild
+   through normal dependencies.
 2. **`rules.mak`** also gets the source lists, placed next to the C lists
    (`C_SRCS`/`L_C_SRCS`, `LIBRARY`), and adds them to `EXECUTABLES`,
    `PRODUCTS` and `SOURCE` where the C lists are added.

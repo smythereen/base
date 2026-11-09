@@ -78,6 +78,20 @@ $(HDR)/%.h :	%.h
 	@mkdir -p -m 775 $(HDR) ;
 	cp -fp	$? $@
 
+#	An installed $(HDR)/foo.h with no foo.h here and not in CHDRS is another
+#	unit's header: an explicit empty rule, so it is never remade here.
+#	Otherwise the .rs.h rule would match it from the bindgen $(HDR)/foo.rs
+#	(a circular dependency) or through a chain from a local foo.rs.
+
+OTHER_HDRS :=	$(filter-out $(CHDRS) $(addprefix $(HDR)/,$(HDRS)),$(wildcard $(HDR)/*.h))
+
+$(OTHER_HDRS): ;
+
+#	Each exported $(HDR)/foo.h names its foo.h, so the rule above wins even
+#	when foo.h is still to be made from foo.rs (.rs.h).
+
+$(filter $(HDR)/%.h,$(CHDRS)) :	$(HDR)/%.h :	%.h
+
 #
 #	Rust bindings phase: one $(HDR)/foo.rs per exported foo.h (rule in rules.mak)
 #

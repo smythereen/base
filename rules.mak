@@ -168,22 +168,25 @@ CBINDGEN_FLAGS = --lang c --cpp-compat
 	@cat *.d > .depend ;
 
 #
-#	foo.h from foo.rs (cbindgen), the C header of a Rust .o/.a/.so.  Manual
-#	only: foo.h is a target just when named on the command line (make foo.h),
-#	never in all/header/library/product, so a plain make never builds or
-#	rebuilds a .h from a .rs, and never matches $(HDR)/foo.h (no cycle with
-#	bindgen).  Not a .rs.h suffix rule for that reason.  An existing foo.h is
-#	overwritten only with its foo.h.cbindgen marker; once made, foo.h is an
-#	ordinary .h (commit it, list it in CHDRS).
+#	foo.h from foo.rs (cbindgen), the C header of a Rust .o/.a/.so.  An
+#	ordinary suffix rule: once foo.h is a prerequisite (.depend, CHDRS), a
+#	newer foo.rs remakes foo.h, then the C objects that include it.  A
+#	foo.h without its foo.h.cbindgen marker is handwritten: a build leaves
+#	it alone with a note, and only "make foo.h" reports an error.  A
+#	bindgen foo.rs (foo.rs.bindgen) is never a source; $(HDR)/foo.h has its
+#	own rules in targets.mak.  cbindgen is needed only to write a header.
 #
 
-RS_HDRS :=	$(filter $(MAKECMDGOALS),$(patsubst %.rs,%.h,$(wildcard *.rs)))
-
-$(RS_HDRS):	%.h :	%.rs
-	@test -n "$(CBINDGEN)" || { echo "error: cbindgen not found (cargo install cbindgen) for $@" >&2 ; exit 1 ; }
-	@if [ -f $@ ] && [ ! -f $@.cbindgen ]; then echo "error: $@ is handwritten (no $@.cbindgen), not overwritten" >&2; exit 1; fi
-	$(CBINDGEN) $(CBINDGEN_FLAGS) -o $@.tmp $< || { rm -f $@.tmp ; exit 1 ; }
-	@touch $@.cbindgen ; g=`echo $(*F)_H | tr a-z.- A-Z__` ; { echo "#ifndef $$g" ; echo "#define $$g" ; cat $@.tmp ; echo "#endif" ; } > $@ ; rm -f $@.tmp
+.rs.h:
+	@if [ -f $<.bindgen ]; then exit 0; fi ; \
+	if [ -f $@ ] && [ ! -f $@.cbindgen ]; then \
+		if [ -n "$(filter $@,$(MAKECMDGOALS))" ]; then echo "error: $@ is handwritten (no $@.cbindgen), not overwritten" >&2; exit 1; fi ; \
+		echo "note: $@ is handwritten (no $@.cbindgen), not made from $<" >&2; exit 0; \
+	fi ; \
+	test -n "$(CBINDGEN)" || { echo "error: cbindgen not found (cargo install cbindgen) for $@" >&2 ; exit 1 ; } ; \
+	echo "$(CBINDGEN) $(CBINDGEN_FLAGS) -o $@ $<" ; \
+	$(CBINDGEN) $(CBINDGEN_FLAGS) -o $@.tmp $< || { rm -f $@.tmp ; exit 1 ; } ; \
+	g=`echo $(*F)_H | tr a-z.- A-Z__` ; { echo "#ifndef $$g" ; echo "#define $$g" ; cat $@.tmp ; echo "#endif" ; } > $@ ; rm -f $@.tmp ; touch $@.cbindgen
 
 $(LIB)/librs_std.a:
 	@-mkdir -p -m 775 $(LIB) ;
