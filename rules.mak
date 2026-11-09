@@ -187,12 +187,13 @@ L_C_SRCS :=	$(shell grep -L "[ 	]main(.*)\|^main(.*)" *.c 2>/dev/null )
 L_CC_SRCS :=	$(shell grep -L "[ 	]main(.*)\|^main(.*)" *.cc 2>/dev/null )
 L_OBJS :=	$(L_C_SRCS:.c=.o) $(L_CC_SRCS:.cc=.o)
 
+# Rust: top-level *.rs with "fn main" are programs, the others form the unit
+# crate lib<unit>.rlib (root lib.rs, else a generated .lib.rs).
 RS_SRCS :=	$(shell grep -l "fn main" *.rs 2>/dev/null )
 L_RS_SRCS :=	$(shell grep -L "fn main" *.rs 2>/dev/null )
 RS_EXES :=	$(RS_SRCS:.rs=)
 RS_CRATE :=	$(subst -,_,$(UNIT))
 RS_LIBRARY :=	$(if $(L_RS_SRCS),$(LIB)/lib$(RS_CRATE).rlib)
-$(if $(filter $(RS_EXES),$(C_SRCS:.c=) $(CC_SRCS:.cc=)),$(error $(UNIT): same program name from .c/.cc and .rs: $(filter $(RS_EXES),$(C_SRCS:.c=) $(CC_SRCS:.cc=))))
 
 ifneq	("$(L_CC_SRCS)","")
 
@@ -263,26 +264,11 @@ SOURCE :=	$(wildcard ?akefile)	\
 		$(PICS)
 
 #
-#	Rust Rules (after the unit lists they use).  Programs are top-level *.rs
-#	with "fn main"; the other top-level *.rs are the unit crate lib<unit>.rlib
-#	(root: lib.rs if present, else a generated .lib.rs with one pub mod each).
-#	Every installed $(HDR)/foo.h gets $(HDR)/foo.rs from bindgen; a foo.rs
-#	without the foo.rs.bindgen marker is handwritten and never overwritten.
+#	Rust bindings: every installed $(HDR)/foo.h can give $(HDR)/foo.rs (the
+#	list is RS_BINDINGS in targets.mak).  A foo.rs without the foo.rs.bindgen
+#	marker is handwritten and never overwritten.  Nothing here expands a unit
+#	list, so the rule stays with the other compile rules.
 #
-
-RS_EXTERN_LIBS =	$(foreach u,$(subst -,_,$(RS_EXTERN)),$(LIB)/lib$(u).rlib)
-RS_EXTERN_ARGS =	-L$(LIB) $(foreach u,$(subst -,_,$(RS_EXTERN)),--extern $(u)=$(LIB)/lib$(u).rlib)
-RS_LINK_ARGS =	$(foreach x,$(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS),-C link-arg=$(x))
-
-$(RS_LIBRARY):	$(L_RS_SRCS)
-	@-mkdir -p -m 775 $(LIB) && test -f $@ && mkdir -p $(LIB)/.old && cp -fp $@ $(LIB)/.old || exit 0 ;
-	@test -f lib.rs || for f in $(L_RS_SRCS); do echo "#[path = \"$$f\"] pub mod `basename $$f .rs | tr -c 'A-Za-z0-9_\n' _`;"; done > .lib.rs ;
-	$(RUSTC) $(RSFLAGS) --crate-type=rlib --crate-name $(RS_CRATE) --emit=link=$@,dep-info=lib$(RS_CRATE).rlib.d $(if $(wildcard lib.rs),lib.rs,.lib.rs) $(RS_EXTERN_ARGS) ;
-	@sed -i 's|^lib$(RS_CRATE).rlib:|$@:|' lib$(RS_CRATE).rlib.d ; echo "$@: $(RS_EXTERN_LIBS)" >> lib$(RS_CRATE).rlib.d ; cat *.d > .depend ;
-
-$(RS_EXES):	% :	%.rs $(RS_LIBRARY)
-	$(RUSTC) $(RSFLAGS) --emit=link=$@,dep-info=$@.d $< $(if $(RS_LIBRARY),--extern $(RS_CRATE)=$(RS_LIBRARY)) $(RS_EXTERN_ARGS) $(RS_LINK_ARGS) ;
-	@echo "$@: $(LIBRARY) $(RS_EXTERN_LIBS)" >> $@.d ; cat *.d > .depend ;
 
 $(HDR)/%.rs :	$(HDR)/%.h
 	@if [ -f $@ ] && [ ! -f $@.bindgen ]; then echo "error: $@ is handwritten (no $@.bindgen), not overwritten" >&2; exit 1; fi

@@ -1,8 +1,23 @@
 # Rust in the unit makefiles
 
-Rust follows the C/C++ model. The compile rules are in `rules.mak` and the
-unit targets (`header`, `bindings`, `library`, `product`, `clean`) are in
-`targets.mak`. A unit makefile doesn't list any Rust files.
+Rust follows the C/C++ model and the same split between the two include files.
+A unit makefile doesn't list any Rust files.
+
+- `rules.mak` has the defaults (`RUSTC`, `RSFLAGS`, `RS_EXTERN`, bindgen), the
+  per-header bindgen rule, and the default lists `RS_SRCS`, `L_RS_SRCS`,
+  `RS_EXES`, `RS_CRATE` and `RS_LIBRARY` (next to `C_SRCS`, `L_OBJS`,
+  `LIBRARY`). The lists are added to `EXECUTABLES`, `PRODUCTS` and `SOURCE`
+  there, the same way the C lists are.
+- `targets.mak` has the rules built from those lists, next to the C ones: the
+  unit rlib into `~/lib` (the counterpart of the `ar` rule), the program link
+  `$(RS_EXES): % : %.rs $(RS_LIBRARY) ...`, the `RS_EXTERN` dependencies, and
+  the `.c`/`.rs` name check.
+
+So between `include ../rules.mak` and `include ../targets.mak` a unit can
+change the Rust lists, add dependencies, or add rules, exactly as it does for
+C. For example, `L_RS_SRCS := $(filter-out wip.rs,$(L_RS_SRCS))` or
+`$(RS_LIBRARY): version.txt`. As with C, if a unit changes `RS_EXES`, it
+should change `PRODUCTS` and `EXECUTABLES` to match.
 
 | C/C++ | Rust |
 |---|---|

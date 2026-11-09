@@ -8,6 +8,12 @@
 
 LDEPS = $(patsubst %.a,  %.a \0134\012,$(patsubst -l%,$(LIB)/lib%.a,$(LIBRARIES)))
 
+RS_EXTERN_LIBS = $(foreach u,$(subst -,_,$(RS_EXTERN)),$(LIB)/lib$(u).rlib)
+RS_EXTERN_ARGS = -L$(LIB) $(foreach u,$(subst -,_,$(RS_EXTERN)),--extern $(u)=$(LIB)/lib$(u).rlib)
+RS_LINK_ARGS = $(foreach x,$(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS),-C link-arg=$(x))
+
+$(if $(filter $(RS_EXES),$(C_SRCS:.c=) $(CC_SRCS:.cc=)),$(error $(UNIT): same program name from .c/.cc and .rs: $(filter $(RS_EXES),$(C_SRCS:.c=) $(CC_SRCS:.cc=))))
+
 #
 #	Common Targets
 #
@@ -57,6 +63,16 @@ $(S_LIBRARY):	$(L_OBJS)
 	$(LCC) -MD -o $@ -shared -Wl,-soname,lib$(UNIT).so $(L_OBJS) $(LDFLAGS) ;
 
 endif
+
+endif
+
+ifneq	("$(RS_LIBRARY)","")
+
+$(RS_LIBRARY):	$(L_RS_SRCS) $(RS_EXTERN_LIBS)
+	@-mkdir -p -m 775 $(LIB) && test -f $@ && mkdir -p $(LIB)/.old && cp -fp $@ $(LIB)/.old || exit 0 ;
+	@test -f lib.rs || for f in $(L_RS_SRCS); do echo "#[path = \"$$f\"] pub mod `basename $$f .rs | tr -c 'A-Za-z0-9_\n' _`;"; done > .lib.rs ;
+	$(RUSTC) $(RSFLAGS) --crate-type=rlib --crate-name $(RS_CRATE) --emit=link=$@,dep-info=lib$(RS_CRATE).rlib.d $(if $(wildcard lib.rs),lib.rs,.lib.rs) $(RS_EXTERN_ARGS) ;
+	@sed -i 's|^lib$(RS_CRATE).rlib:|$@:|' lib$(RS_CRATE).rlib.d ; cat *.d > .depend ;
 
 endif
 
@@ -150,6 +166,14 @@ else
 % :	%.cc
 	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) $(LIBRARIES) $(SYS_LIBS);
 	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   " | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+
+endif
+
+ifneq	("$(RS_EXES)","")
+
+$(RS_EXES):	% :	%.rs $(RS_LIBRARY) $(LIBRARY) $(RS_EXTERN_LIBS)
+	$(RUSTC) $(RSFLAGS) --emit=link=$@,dep-info=$@.d $< $(if $(RS_LIBRARY),--extern $(RS_CRATE)=$(RS_LIBRARY)) $(RS_EXTERN_ARGS) $(RS_LINK_ARGS) ;
+	@cat *.d > .depend ;
 
 endif
 
