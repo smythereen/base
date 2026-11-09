@@ -9,6 +9,11 @@ dropped into any unit builds and installs with plain `make`, just like
 |---|---|---|
 | `CC`, `CFLAGS` | `RUSTC`, `RSFLAGS` (`-g --edition=2021`) | rules.mak |
 | `.c:` suffix rule (no deps; links `$(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES)`, fixes `.d`, `.depend`, `$(BIN)/x.old`, copies to `$(BIN)`) | `.rs:`, the same lines, with rustc | rules.mak |
+| `.c.o` (`$(CC) -o $*.o -c -MD ...`, then `cat *.d > .depend`) | `.rs.o`: `$(RUSTC) -o $*.o $(RS_CFLAGS) --emit=obj,dep-info=$*.d ...`, then `cat *.d > .depend`. The object is for C to link (see below) | rules.mak |
+| `.c.a` (compile, `ar` into `$@`) | `.rs.a`: a staticlib `foo.a` with the Rust runtime inside, so C links it like any `.a` and needs nothing extra. It is a whole archive, not one added member | rules.mak |
+| `.c.s` (`-S`) | `.rs.s` (`--emit=asm`) | rules.mak |
+| `.c.i` (`-P`, preprocess) | none: the Rust equivalent (`-Zunpretty=expanded`) works only on nightly rustc | |
+| none | `.rs.ll` (`--emit=llvm-ir`), and `.rs.so` (a cdylib `foo.so` with the runtime inside, for C) | rules.mak |
 | `C_SRCS` (`main(`), `L_C_SRCS` | `RS_SRCS` (`fn main`), `L_RS_SRCS` | rules.mak |
 | `ifneq L_OBJS` → `LIBRARY := $(LIB)/lib$(UNIT).a`, `.PRECIOUS` | `ifneq L_RS_SRCS` → `RS_LIBRARY := $(LIB)/lib$(RS_CRATE).rlib`, `.PRECIOUS` | rules.mak |
 | `$(OBJS:.o=)` in `EXECUTABLES`, `PRODUCTS`; sources in `SOURCE` | `$(RS_SRCS:.rs=)`, the same lists | rules.mak |
@@ -41,9 +46,15 @@ Everything can be overridden between `include ../rules.mak` and
 - **`-C link-args="..."`**: rustc passes this string to the linker. It is
   quoted, so the shell expands values such as `` `pkg-config --libs ...` ``
   in `LIBRARIES` just as it does on the gcc line.
-- **No compile-only suffix rule** (C's `.c.o`, `.c.a`): Rust compiles a whole
-  crate at once, not one object per file. The rlib rule next to the `ar` rule
-  does it.
+- **`RS_CFLAGS`** (`--crate-type=lib -C panic=abort`) is used by `.rs.o`,
+  `.rs.s` and `.rs.ll`. `panic=abort` keeps a Rust panic from unwinding into
+  C. `.rs.a` and `.rs.so` use the same panic setting.
+- **`RS_STD_LIBS`** (`~/lib/librs_std.a` plus the native libraries) is the
+  Rust standard library for C links. `librs_std.a` is built once by a
+  no-dependency rule in `rules.mak`. The C and C++ link rules in
+  `targets.mak` append it (as `$(RS_STD)`) only when the unit links a Rust
+  object, meaning a `foo.o` that has a `foo.rs` appears in `L_OBJS`, `OBJS`
+  or `LIBRARIES`. Other units are unchanged.
 - **Bindings** (`make bindings`, after `header`): each exported
   `~/cmn/foo.h` gets `~/cmn/foo.rs` from `bindgen`.
   - The `$(HDR)/%.rs : $(HDR)/%.h` rule is in `rules.mak`. The list
@@ -56,6 +67,37 @@ Everything can be overridden between `include ../rules.mak` and
     that an error, and `BINDGEN=` turns bindings off. `BINDGEN_FLAGS` and
     `RS_BINDGEN_CFLAGS` add options (C++ headers need `-x c++`).
   - Use a binding with `include!(concat!(env!("HOME"), "/cmn/foo.rs"));`.
+
+## Linking a Rust object into C
+
+All of these rules are opt-in. `make foo.o` (or `foo.a`, `foo.so`, `foo.s`,
+`foo.ll`) runs them, and so does a unit that lists the file. Default discovery
+doesn't change: a `foo.rs` without `fn main` still goes into the unit rlib.
+
+```rust
+// foo.rs: every function C calls is #[no_mangle] pub extern "C"
+#[no_mangle]
+pub extern "C" fn foo_add(a: i32, b: i32) -> i32 { a + b }
+```
+
+- **Into the unit's C library**, the same as a `.c` without `main`: put
+  `L_OBJS += foo.o` between the includes. `.rs.o` builds `foo.o`, the `ar`
+  rule adds it to `lib<unit>.a`, and C programs link it. Editing `foo.rs`
+  rebuilds `foo.o` (through `.depend`), then the library, then the programs.
+  If the unit has no C library sources, also set
+  `LIBRARY := $(LIB)/lib$(UNIT).a`.
+- **Straight into one program**: `LIBRARIES += foo.o` and `prog: foo.o`.
+- **Using `std`**: nothing more is needed. `RS_STD_LIBS` is added
+  automatically.
+- **`#![no_std]` with a `#[panic_handler]`**: the object links into C with
+  nothing extra, so set `RS_STD_LIBS =`. Keep the file out of the unit rlib
+  with `L_RS_SRCS := $(filter-out foo.rs,$(L_RS_SRCS))`, and add
+  `RS_LIBRARY :=` if that empties the list (as `tali` does with
+  `LIBRARY =`).
+- **The whole runtime in one file**: `make foo.a` (link it like any `.a`) or
+  `make foo.so`.
+- **Reading `foo.s`**: rustc writes DWARF 5 `.file` lines, so assemble it
+  with `as --gdwarf-5` or `gcc -c -Wa,--gdwarf-5`.
 
 Rust can call only the C ABI. To use C++ code, export `extern "C"` wrappers
 from the C++ side and add `SYS_LIBS += -lstdc++`.

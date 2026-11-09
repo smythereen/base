@@ -103,6 +103,8 @@ RUSTC ?=	rustc
 RSFLAGS =	-g --edition=2021
 RS_EXTERN =
 RS_EXTERN_ARGS = $(foreach u,$(subst -,_,$(RS_EXTERN)),--extern $(u)=$(LIB)/lib$(u).rlib)
+RS_CFLAGS =	--crate-type=lib -C panic=abort
+RS_STD_LIBS =	$(LIB)/librs_std.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
 RS_BINDGEN ?=	auto
 BINDGEN ?=	$(shell PATH="$(HOME)/.cargo/bin:$$PATH" command -v bindgen 2>/dev/null)
 BINDGEN_FLAGS =
@@ -113,7 +115,7 @@ RS_BINDGEN_CFLAGS =
 #
 
 .SUFFIXES:
-.SUFFIXES:	.so .a .o .s .i .c .cc .cxx .rs .h .hxx .dat .class
+.SUFFIXES:	.so .a .o .s .i .c .cc .cxx .rs .h .hxx .dat .class .ll
 
 .cxx.a:
 	$(CXX) -o $* -c -MD $(CXXFLAGS) $< ;
@@ -130,6 +132,10 @@ RS_BINDGEN_CFLAGS =
 	@cat *.d > .depend ;
 	ar -rUs $@ $*.o
 
+.rs.a:
+	$(RUSTC) -o $@ --crate-type=staticlib -C panic=abort --emit=link,dep-info=$*.d $(RSFLAGS) $< ;
+	@cat *.d > .depend ;
+
 .cxx.o:
 	$(CXX) -o $*.o -c -MD $(CXXFLAGS) $< ;
 	@cat *.d > .depend ;
@@ -142,8 +148,26 @@ RS_BINDGEN_CFLAGS =
 	$(CC) -o $*.o -c -MD $(CFLAGS) $< ;
 	@cat *.d > .depend ;
 
+.rs.o:
+	$(RUSTC) -o $*.o $(RS_CFLAGS) --emit=obj,dep-info=$*.d $(RSFLAGS) $< ;
+	@cat *.d > .depend ;
+
 .c.s:
 	$(CC) -S -MD $(CFLAGS) $< ;
+
+.rs.s:
+	$(RUSTC) -o $*.s $(RS_CFLAGS) --emit=asm,dep-info=$*.d $(RSFLAGS) $< ;
+
+.rs.ll:
+	$(RUSTC) -o $*.ll $(RS_CFLAGS) --emit=llvm-ir,dep-info=$*.d $(RSFLAGS) $< ;
+
+.rs.so:
+	$(RUSTC) -o $@ --crate-type=cdylib -C panic=abort --emit=link,dep-info=$*.d $(RSFLAGS) $< ;
+	@cat *.d > .depend ;
+
+$(LIB)/librs_std.a:
+	@-mkdir -p -m 775 $(LIB) ;
+	echo "" | $(RUSTC) -o $@ --crate-type=staticlib --crate-name rs_std -C panic=abort $(RSFLAGS) - ;
 
 .c.i:
 	$(CC) -P $(CFLAGS) $< ;

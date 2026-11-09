@@ -92,6 +92,10 @@ C implementation rule for rule:
    compiles and links with `$(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES)`,
    fixes up the `.d` file, writes `.depend`, moves the old `$(BIN)` copy to
    `.old`, and copies the program to `$(BIN)`.
+   Each C compile-only rule (`.c.o`, `.c.a`, `.c.s`, `.c.i`) gets a
+   no-dependency counterpart where the language has one, so C units can link
+   the language's objects directly (Rust: `.rs.o`, `.rs.a`, `.rs.s`). These
+   rules are opt-in and never change default discovery.
 2. **`rules.mak`** also gets the source lists, placed next to the C lists
    (`C_SRCS`/`L_C_SRCS`, `LIBRARY`), and adds them to `EXECUTABLES`,
    `PRODUCTS` and `SOURCE` where the C lists are added.
