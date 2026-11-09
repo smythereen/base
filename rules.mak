@@ -18,6 +18,7 @@ BIN =		$(shell echo ~)/bin
 HDR =		$(shell echo ~)/cmn
 HLP =		$(shell echo ~)/hlp
 LIB =		$(shell echo ~)/lib
+LOG =		$(shell echo ~)/log
 RUN =		$(shell echo ~)/run
 TMP =		$(shell echo ~)/tmp
 
@@ -93,72 +94,25 @@ LDFLAGS =	-L$(LIB)
 
 
 #
-#	Rust (optional)
-#
-#	Units list crate roots explicitly between include ../rules.mak and
-#	include ../targets.mak. Nested modules are NOT crate roots; list them
-#	in RS_EXTRA_SRCS if copy_to_* should carry them. See ~/RUST.md.
-#
-#	RS_EXES        optional explicit crate-root .rs executables (far-style:
-#	               top-level *.rs with fn main are auto-discovered; see RS_AUTO_EXES)
-#	RS_AUTO_EXES   yes (default) | no — auto-pick top-level *.rs containing fn main
-#	RS_NO_EXES     extra .rs basenames to exclude from auto-exe discovery
-#	RS_STATICLIBS  crate-root .rs files -> libNAME.a  (--crate-type=staticlib, C ABI)
-#	RS_RLIBS       crate-root .rs files -> libNAME.rlib (Rust-only)
-#	RS_CDYLIBS     crate-root .rs files -> libNAME.so (--crate-type=cdylib)
-#	RS_OBJS        crate-root .rs files -> NAME.o (--emit=obj); final link must
-#	               still supply the Rust runtime (prefer linking with rustc)
-#	RS_EXTRA_SRCS  extra .rs modules for SOURCE/copy lists (also excluded from auto-exe)
-#	RS_AUTO_LIB    yes (default) | no — auto-build lib<crate>.rlib from non-main .rs
-#	RS_NO_LIB      .rs files excluded from auto unit-library membership
-#	RS_EXTERN      other unit/crate names this unit links via --extern (see RUST.md)
-#	RSFLAGS        extra rustc flags
-#	RS_SYS_LIBS    extra native linker args for Rust links (e.g. -lstdc++)
-#	RS_NATIVE_LIBS native libs C/C++ needs when linking a Rust staticlib
-#
-#	Rust cannot call arbitrary C++ ABI symbols. Export extern "C" wrappers
-#	from C/C++ (or use a C API) and declare them in Rust with extern "C".
-#	Per-header bindgen (optional): after headers are copied into $(HDR)/cmn,
-#	each installed foo.h can produce foo.rs. See ~/RUST.md (RS_BINDGEN).
-#	Generated cmn/*.rs files are NOT crate roots.
+#	Rust (optional, see RUST.md).  Units may set RS_EXTERN (other units' rlibs
+#	to link) and RSFLAGS.  Per-header bindings need bindgen; RS_BINDGEN=required
+#	makes a missing bindgen an error, BINDGEN= turns bindings off.
 #
 
 RUSTC ?=	rustc
-RSFLAGS ?=
-RS_EXES ?=
-RS_AUTO_EXES ?=	yes
-RS_NO_EXES ?=
-RS_STATICLIBS ?=
-RS_RLIBS ?=
-RS_CDYLIBS ?=
-RS_OBJS ?=
-RS_EXTRA_SRCS ?=
-RS_AUTO_LIB ?=	yes
-RS_NO_LIB ?=
-RS_EXTERN ?=
-RS_UNIT_LIB_ROOT_SH ?=	$(HOME)/bin/rust-unit-lib-root
-RS_SYS_LIBS ?=
-RS_NATIVE_LIBS ?=	-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
-
-# auto (default): generate when bindgen is available; otherwise C-only headers succeed
-# off: never generate   required: fail if bindgen missing or generation fails
+RSFLAGS =	-g --edition=2021
+RS_EXTERN =
 RS_BINDGEN ?=	auto
 BINDGEN ?=	$(shell PATH="$(HOME)/.cargo/bin:$$PATH" command -v bindgen 2>/dev/null)
-# HAVE_BINDGEN is computed in targets.mak after unit/cmdline BINDGEN overrides.
-BINDGEN_FLAGS ?=
-# Clang args for bindgen. Include $(HDR) and the unit dir (.) so public
-# header fragments (*.def enums/structs) resolve like the C compile, whether
-# found via installed ~/cmn or still source-local in the unit.
-BINDGEN_CFLAGS ?=	$(INCLUDES) -I. $(RS_BINDGEN_CFLAGS)
-RS_BINDGEN_CFLAGS ?=
-BINDGEN_HEADER ?=	$(HOME)/bin/bindgen-header
+BINDGEN_FLAGS =
+RS_BINDGEN_CFLAGS =
 
 #
 #	Common Rules
 #
 
 .SUFFIXES:
-.SUFFIXES:	.so .a .o .s .i .c .cc .cxx .rs .h .hxx .dat .class .rlib
+.SUFFIXES:	.so .a .o .s .i .c .cc .cxx .rs .h .hxx .dat .class
 
 .cxx.a:
 	$(CXX) -o $* -c -MD $(CXXFLAGS) $< ;
@@ -233,6 +187,13 @@ L_C_SRCS :=	$(shell grep -L "[ 	]main(.*)\|^main(.*)" *.c 2>/dev/null )
 L_CC_SRCS :=	$(shell grep -L "[ 	]main(.*)\|^main(.*)" *.cc 2>/dev/null )
 L_OBJS :=	$(L_C_SRCS:.c=.o) $(L_CC_SRCS:.cc=.o)
 
+RS_SRCS :=	$(shell grep -l "fn main" *.rs 2>/dev/null )
+L_RS_SRCS :=	$(shell grep -L "fn main" *.rs 2>/dev/null )
+RS_EXES :=	$(RS_SRCS:.rs=)
+RS_CRATE :=	$(subst -,_,$(UNIT))
+RS_LIBRARY :=	$(if $(L_RS_SRCS),$(LIB)/lib$(RS_CRATE).rlib)
+$(if $(filter $(RS_EXES),$(C_SRCS:.c=) $(CC_SRCS:.cc=)),$(error $(UNIT): same program name from .c/.cc and .rs: $(filter $(RS_EXES),$(C_SRCS:.c=) $(CC_SRCS:.cc=))))
+
 ifneq	("$(L_CC_SRCS)","")
 
 LCC := $(CXX)
@@ -274,9 +235,10 @@ SCRIPTS :=	$(wildcard *.sh)
 H_SCRIPTS :=	$(wildcard *.hsh)
 
 EXECUTABLES :=	$(addprefix $(BIN)/,$(OBJS:.o=))	\
+		$(addprefix $(BIN)/,$(RS_EXES))		\
 		$(addprefix $(BIN)/,$(SCRIPTS:.sh=))
 
-PRODUCTS :=	$(OBJS:.o=)					\
+PRODUCTS :=	$(OBJS:.o=) $(RS_EXES)				\
 		$(EXECUTABLES)					\
 		$(addprefix $(CSS_DIR)/,$(STYLES))		\
 		$(addprefix $(IMG_DIR)/,$(PICS))		\
@@ -293,8 +255,39 @@ SOURCE :=	$(wildcard ?akefile)	\
 		$(CC_SRCS)		\
 		$(L_C_SRCS)		\
 		$(L_CC_SRCS)		\
+		$(RS_SRCS)		\
+		$(L_RS_SRCS)		\
 		$(SCRIPTS)		\
 		$(H_SCRIPTS)		\
 		$(HTML)			\
 		$(PICS)
 
+#
+#	Rust Rules (after the unit lists they use).  Programs are top-level *.rs
+#	with "fn main"; the other top-level *.rs are the unit crate lib<unit>.rlib
+#	(root: lib.rs if present, else a generated .lib.rs with one pub mod each).
+#	Every installed $(HDR)/foo.h gets $(HDR)/foo.rs from bindgen; a foo.rs
+#	without the foo.rs.bindgen marker is handwritten and never overwritten.
+#
+
+RS_EXTERN_LIBS =	$(foreach u,$(subst -,_,$(RS_EXTERN)),$(LIB)/lib$(u).rlib)
+RS_EXTERN_ARGS =	-L$(LIB) $(foreach u,$(subst -,_,$(RS_EXTERN)),--extern $(u)=$(LIB)/lib$(u).rlib)
+RS_LINK_ARGS =	$(foreach x,$(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS),-C link-arg=$(x))
+
+$(RS_LIBRARY):	$(L_RS_SRCS)
+	@-mkdir -p -m 775 $(LIB) && test -f $@ && mkdir -p $(LIB)/.old && cp -fp $@ $(LIB)/.old || exit 0 ;
+	@test -f lib.rs || for f in $(L_RS_SRCS); do echo "#[path = \"$$f\"] pub mod `basename $$f .rs | tr -c 'A-Za-z0-9_\n' _`;"; done > .lib.rs ;
+	$(RUSTC) $(RSFLAGS) --crate-type=rlib --crate-name $(RS_CRATE) --emit=link=$@,dep-info=lib$(RS_CRATE).rlib.d $(if $(wildcard lib.rs),lib.rs,.lib.rs) $(RS_EXTERN_ARGS) ;
+	@sed -i 's|^lib$(RS_CRATE).rlib:|$@:|' lib$(RS_CRATE).rlib.d ; echo "$@: $(RS_EXTERN_LIBS)" >> lib$(RS_CRATE).rlib.d ; cat *.d > .depend ;
+
+$(RS_EXES):	% :	%.rs $(RS_LIBRARY)
+	$(RUSTC) $(RSFLAGS) --emit=link=$@,dep-info=$@.d $< $(if $(RS_LIBRARY),--extern $(RS_CRATE)=$(RS_LIBRARY)) $(RS_EXTERN_ARGS) $(RS_LINK_ARGS) ;
+	@echo "$@: $(LIBRARY) $(RS_EXTERN_LIBS)" >> $@.d ; cat *.d > .depend ;
+
+$(HDR)/%.rs :	$(HDR)/%.h
+	@if [ -f $@ ] && [ ! -f $@.bindgen ]; then echo "error: $@ is handwritten (no $@.bindgen), not overwritten" >&2; exit 1; fi
+	$(BINDGEN) $< -o $@.tmp --depfile $@.d $(BINDGEN_FLAGS) -- $(INCLUDES) -I. $(RS_BINDGEN_CFLAGS) \
+		&& sed -i 's|$@.tmp|$@|' $@.d && mv -f $@.tmp $@ && touch $@.bindgen \
+		|| { rm -f $@.tmp ; echo "error: bindgen failed for $<" >&2 ; test "$(RS_BINDGEN)" != required ; }
+
+-include $(wildcard $(HDR)/*.rs.d)

@@ -130,7 +130,7 @@ Run `make [target]` inside a unit, or from the root for all units. With no targe
 | `source` | Builds `SRC_ADD` (extra generated sources), if any, and reports completion |
 | `source_list` | Does nothing but report completion. It exists so the root `source_list` phase finds the target in every unit |
 | `header` | Copies each file in `CHDRS` to `~/cmn` with `cp -fp` when it is newer |
-| `bindings` | Optional: generate `~/cmn/*.rs` from installed `*.h` (`RS_BINDGEN=auto|off|required`). `*.def` in `CHDRS` are installed but are not bindgen roots |
+| `bindings` | Optional: generate `~/cmn/*.rs` from installed `*.h` when `bindgen` is installed (`RS_BINDGEN=required` makes a missing bindgen an error; see `RUST.md`). `*.def` in `CHDRS` are installed but are not bindgen roots |
 | `library` | Compiles the library sources and adds them to `~/lib/lib<unit>.a` with `ar -rUs`. The previous library is first saved in `~/lib/.old` |
 | `product` | Builds every program in the unit directory (linking the unit library and `LIBRARIES`), and installs it in `~/bin`. The previous copy is moved to `~/bin/.old`. Installs scripts and web files too |
 | `cleanup` / `clean` | The same rule under two names. Deletes `*.o *.a *.d *.tmp core.*` and the built programs in the unit directory, deletes the unit's exported headers from `~/cmn`, moves its installed programs to `~/bin/.old` and its library to `~/lib/.old`, and empties `.depend`. It does not delete anything for good |

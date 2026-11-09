@@ -3,4 +3,4 @@
 # sys and atomic are NOT here: they are in the starter list (project NONE) and
 # are fetched before compile. repo and bin ship with the base tree.
 repo		# the tools that maintain project.repos and fetch units
-bin		# helpers: bindgen-header, rust-unit-lib-root, profile_add
+bin		# helpers: profile_add

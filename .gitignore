@@ -19,8 +19,6 @@ core.*
 !/bin/.gitkeep
 !/bin/makefile
 !/bin/*.sh
-!/bin/bindgen-header
-!/bin/rust-unit-lib-root
 !/bin/profile_add
 !/lib/.gitkeep
 !/cmn/.gitkeep

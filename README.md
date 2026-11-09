@@ -71,7 +71,7 @@ Base is only the **project shell**:
 | `rules.mak` / `targets.mak` | Shared compile/install rules |
 | `base.units` | Units that ship inside base (`repo`, `bin`) |
 | `repo/` | Shell tools: `repo.sh`, `fetch-units.sh`, add/remove/list/… |
-| `bin/` | Helpers unit: `bindgen-header`, `rust-unit-lib-root`, `profile_add` |
+| `bin/` | Helpers unit: `profile_add` |
 | `cmn/` `lib/` `hlp/` `log/` `run/` `tmp/` | Install / log dirs (`.gitkeep` where empty) |
 | `RUST.md` | Optional Rust / bindgen make integration |
 | `project.repos.example` / `private.units.example` / `env.example` | Templates |

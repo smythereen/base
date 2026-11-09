@@ -99,6 +99,10 @@ SHELL :=	/bin/bash
 
 .DEFAULT_GOAL := all
 
+# The phases (header bindings library product) run one after another even
+# with make -j; -j still reaches each unit's own make through MAKEFLAGS.
+.NOTPARALLEL:
+
 REPO_AUTO ?=	yes
 REPO =		repo/repo.sh
 PROJ_LIST =	project.repos
@@ -252,11 +256,10 @@ header bindings_units library product cleanup clean source_list dist_clean::
 		fi; \
 	done; \
 	if [ "$${utgt}" = "bindings" ]; then \
-	  fails=`grep -c "bindgen failed" $${log} 2>/dev/null || true` ; \
+	  fails=`grep -c "^error: bindgen failed" $${log} 2>/dev/null || true` ; \
 	  errs=`grep -c "make\[1\]: \*\*\*" $${log} 2>/dev/null || true` ; \
-	  miss=`grep -c "warning: bindings: missing" $${log} 2>/dev/null || true` ; \
-	  echo "	bindings summary: bindgen_failed=$$fails missing_rs_warnings=$$miss make_errors=$$errs (see $${log})" ; \
-	  echo "BINDINGS_PHASE_STATUS bindgen_failed=$$fails missing_rs_warnings=$$miss make_errors=$$errs" ; \
+	  echo "	bindings summary: bindgen_failed=$$fails make_errors=$$errs (see $${log})" ; \
+	  echo "BINDINGS_PHASE_STATUS bindgen_failed=$$fails make_errors=$$errs" ; \
 	fi; \
 	true
 
@@ -339,26 +342,4 @@ copy_to_peer:	COPY_TO_PEER
 	done ;
 
 #		for P in $(PEERS); do ping -q -c 1 -W 1 $${P} >/dev/null 2>&1 || continue ; ssh $(LOGNAME)@$${P} "mkdir -p $${unit} ;" ; done ;\
-
-COPY_TO_DEV2:
-	@scp -p $(SOURCE) dev2@$(TGT_HOST):.
-
-copy_to_dev2:	COPY_TO_DEV2
-	@for unit in $(UNITS) ;\
-	do \
-		cd	$${unit} 1>/dev/null 2>&1 ;\
-		make	$(@) ;\
-		cd	.. 1>/dev/null 2>&1 ;\
-	done ;
-
-COPY_TO_DEV3:
-	@scp -p $(SOURCE) dev3@$(TGT_HOST):.
-
-copy_to_dev3:	COPY_TO_DEV3
-	@for unit in $(UNITS) ;\
-	do \
-		cd	$${unit} 1>/dev/null 2>&1 ;\
-		make	$(@) ;\
-		cd	.. 1>/dev/null 2>&1 ;\
-	done ;
 
