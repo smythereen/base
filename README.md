@@ -49,6 +49,8 @@ Convention:
 
 `rules.mak` discovers sources automatically: `.c`/`.cc` with `main(` become
 programs; other `.c`/`.cc` go into the library. You do not list object files.
+Rust works the same way: `.rs` with `fn main` are programs, and the other
+`.rs` files form `~/lib/lib<unit>.rlib`.
 
 Each unit builds with its own makefile. The root makefile runs phases across
 selected units: **header → bindings → library → product**. For each unit it runs
@@ -78,6 +80,35 @@ Base is only the **project shell**:
 
 `sys` and `atomic` are **not** in base; they are on the starter list and are
 fetched before compile.
+
+## Adding a language
+
+This is the standing rule for every language added to the unit system. Rust
+was the first one added this way (see `RUST.md`). A new language mirrors the
+C implementation rule for rule:
+
+1. **`rules.mak`** gets the language's defaults (compiler, flags) and a suffix
+   rule with **no dependencies**, modeled line for line on `.c:`. The rule
+   compiles and links with `$(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES)`,
+   fixes up the `.d` file, writes `.depend`, moves the old `$(BIN)` copy to
+   `.old`, and copies the program to `$(BIN)`.
+2. **`rules.mak`** also gets the source lists, placed next to the C lists
+   (`C_SRCS`/`L_C_SRCS`, `LIBRARY`), and adds them to `EXECUTABLES`,
+   `PRODUCTS` and `SOURCE` where the C lists are added.
+3. **`targets.mak`** gets the dependency and pattern rules (`% : %.x
+   $(LIBRARY) ...`), the library rule next to the `ar` rule, and the install
+   and `clean` lines, all placed where the C ones are and shaped like them.
+4. Everything stays **overridable between `include ../rules.mak` and
+   `include ../targets.mak`**, as for C. A unit can change lists,
+   dependencies and rules there.
+5. **Drop-in works**: a standalone source file with a main program, dropped
+   into any unit directory, builds and installs with plain `make` (and with
+   `make <name>`), exactly like a `.c` file. That holds in every kind of unit:
+   C-only, C++, no library, units with other languages, and units with
+   overrides.
+
+Nothing language-specific is added unless the language needs it, and each
+such addition is documented with its reason (see `RUST.md`).
 
 ## Project-per-login model
 

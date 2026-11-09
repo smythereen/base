@@ -94,14 +94,15 @@ LDFLAGS =	-L$(LIB)
 
 
 #
-#	Rust (optional, see RUST.md).  Units may set RS_EXTERN (other units' rlibs
-#	to link) and RSFLAGS.  Per-header bindings need bindgen; RS_BINDGEN=required
-#	makes a missing bindgen an error, BINDGEN= turns bindings off.
+#	Rust (optional, see RUST.md).  RSFLAGS is the CFLAGS of rustc, RS_EXTERN
+#	the LIBRARIES of Rust (other units' ~/lib/lib<unit>.rlib), and bindgen
+#	makes $(HDR)/foo.rs from each installed $(HDR)/foo.h.
 #
 
 RUSTC ?=	rustc
 RSFLAGS =	-g --edition=2021
 RS_EXTERN =
+RS_EXTERN_ARGS = $(foreach u,$(subst -,_,$(RS_EXTERN)),--extern $(u)=$(LIB)/lib$(u).rlib)
 RS_BINDGEN ?=	auto
 BINDGEN ?=	$(shell PATH="$(HOME)/.cargo/bin:$$PATH" command -v bindgen 2>/dev/null)
 BINDGEN_FLAGS =
@@ -171,6 +172,12 @@ RS_BINDGEN_CFLAGS =
 	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
 	cp -p $@ $(BIN) ;
 
+.rs:
+	$(RUSTC) -o $* --emit=link,dep-info=$*.d $(RSFLAGS) $< -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES)" ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
+	cp -p $@ $(BIN) ;
+
 #
 #	Common UNIT Initialization
 #
@@ -187,13 +194,9 @@ L_C_SRCS :=	$(shell grep -L "[ 	]main(.*)\|^main(.*)" *.c 2>/dev/null )
 L_CC_SRCS :=	$(shell grep -L "[ 	]main(.*)\|^main(.*)" *.cc 2>/dev/null )
 L_OBJS :=	$(L_C_SRCS:.c=.o) $(L_CC_SRCS:.cc=.o)
 
-# Rust: top-level *.rs with "fn main" are programs, the others form the unit
-# crate lib<unit>.rlib (root lib.rs, else a generated .lib.rs).
 RS_SRCS :=	$(shell grep -l "fn main" *.rs 2>/dev/null )
 L_RS_SRCS :=	$(shell grep -L "fn main" *.rs 2>/dev/null )
-RS_EXES :=	$(RS_SRCS:.rs=)
 RS_CRATE :=	$(subst -,_,$(UNIT))
-RS_LIBRARY :=	$(if $(L_RS_SRCS),$(LIB)/lib$(RS_CRATE).rlib)
 
 ifneq	("$(L_CC_SRCS)","")
 
@@ -228,6 +231,18 @@ S_LIBRARY :=
 
 endif
 
+ifneq	("$(L_RS_SRCS)","")
+
+RS_LIBRARY :=	$(LIB)/lib$(RS_CRATE).rlib
+
+.PRECIOUS:	$(RS_LIBRARY)
+
+else
+
+RS_LIBRARY :=
+
+endif
+
 HTML :=		$(wildcard *.html)
 PICS :=		$(wildcard *.bmp *.gif *.jpg *.ico)
 STYLES :=	$(wildcard *.css *.js)
@@ -236,10 +251,10 @@ SCRIPTS :=	$(wildcard *.sh)
 H_SCRIPTS :=	$(wildcard *.hsh)
 
 EXECUTABLES :=	$(addprefix $(BIN)/,$(OBJS:.o=))	\
-		$(addprefix $(BIN)/,$(RS_EXES))		\
+		$(addprefix $(BIN)/,$(RS_SRCS:.rs=))	\
 		$(addprefix $(BIN)/,$(SCRIPTS:.sh=))
 
-PRODUCTS :=	$(OBJS:.o=) $(RS_EXES)				\
+PRODUCTS :=	$(OBJS:.o=) $(RS_SRCS:.rs=)			\
 		$(EXECUTABLES)					\
 		$(addprefix $(CSS_DIR)/,$(STYLES))		\
 		$(addprefix $(IMG_DIR)/,$(PICS))		\
@@ -264,10 +279,9 @@ SOURCE :=	$(wildcard ?akefile)	\
 		$(PICS)
 
 #
-#	Rust bindings: every installed $(HDR)/foo.h can give $(HDR)/foo.rs (the
-#	list is RS_BINDINGS in targets.mak).  A foo.rs without the foo.rs.bindgen
-#	marker is handwritten and never overwritten.  Nothing here expands a unit
-#	list, so the rule stays with the other compile rules.
+#	Rust bindings: $(HDR)/foo.rs from an installed $(HDR)/foo.h (the list is
+#	RS_BINDINGS in targets.mak).  A foo.rs without the foo.rs.bindgen marker
+#	is handwritten and never overwritten.
 #
 
 $(HDR)/%.rs :	$(HDR)/%.h

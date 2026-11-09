@@ -182,6 +182,13 @@ No makefile change. It is linked with the unit library and `LIBRARIES`, then ins
 4. `make -C ~/myunit`. The root `makefile` finds the unit by itself on the next full build; no list to edit.
    Build the units named in `LIBRARIES` first, or at least have their headers in `~/cmn` and libraries in `~/lib`.
 
+**A new language** follows the "Adding a language" rule in `README.md`. It
+mirrors the C rules exactly: a no-dependency suffix rule in `rules.mak`, lists
+next to the C lists, and dependency and library rules in `targets.mak` where
+the C ones are, all overridable between the includes. A standalone source file
+dropped into any unit builds and installs with plain `make`, just like a `.c`
+file. Rust is the example; see `RUST.md`.
+
 ## 7. Working on a subset of units
 
 This is how a large team uses the system. A developer does not need the whole project, and how he

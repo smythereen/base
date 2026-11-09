@@ -8,11 +8,7 @@
 
 LDEPS = $(patsubst %.a,  %.a \0134\012,$(patsubst -l%,$(LIB)/lib%.a,$(LIBRARIES)))
 
-RS_EXTERN_LIBS = $(foreach u,$(subst -,_,$(RS_EXTERN)),$(LIB)/lib$(u).rlib)
-RS_EXTERN_ARGS = -L$(LIB) $(foreach u,$(subst -,_,$(RS_EXTERN)),--extern $(u)=$(LIB)/lib$(u).rlib)
-RS_LINK_ARGS = $(foreach x,$(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS),-C link-arg=$(x))
-
-$(if $(filter $(RS_EXES),$(C_SRCS:.c=) $(CC_SRCS:.cc=)),$(error $(UNIT): same program name from .c/.cc and .rs: $(filter $(RS_EXES),$(C_SRCS:.c=) $(CC_SRCS:.cc=))))
+RS_LDEPS = $(foreach u,$(subst -,_,$(RS_EXTERN)),$(LIB)/lib$(u).rlib)
 
 #
 #	Common Targets
@@ -66,13 +62,13 @@ endif
 
 endif
 
-ifneq	("$(RS_LIBRARY)","")
+ifneq	("$(L_RS_SRCS)","")
 
-$(RS_LIBRARY):	$(L_RS_SRCS) $(RS_EXTERN_LIBS)
+$(RS_LIBRARY):	$(L_RS_SRCS)
 	@-mkdir -p -m 775 $(LIB) && test -f $@ && mkdir -p $(LIB)/.old && cp -fp $@ $(LIB)/.old || exit 0 ;
-	@test -f lib.rs || for f in $(L_RS_SRCS); do echo "#[path = \"$$f\"] pub mod `basename $$f .rs | tr -c 'A-Za-z0-9_\n' _`;"; done > .lib.rs ;
-	$(RUSTC) $(RSFLAGS) --crate-type=rlib --crate-name $(RS_CRATE) --emit=link=$@,dep-info=lib$(RS_CRATE).rlib.d $(if $(wildcard lib.rs),lib.rs,.lib.rs) $(RS_EXTERN_ARGS) ;
-	@sed -i 's|^lib$(RS_CRATE).rlib:|$@:|' lib$(RS_CRATE).rlib.d ; cat *.d > .depend ;
+	@for f in $(L_RS_SRCS) ; do echo "#[path = \"$$f\"] pub mod `basename $$f .rs | tr -c 'A-Za-z0-9_\n' _`;" ; done > .lib.rs ;
+	$(RUSTC) -o $@ --crate-type=rlib --crate-name $(RS_CRATE) --emit=link,dep-info=lib$(RS_CRATE).d $(RSFLAGS) .lib.rs -L$(LIB) $(RS_EXTERN_ARGS) ;
+	@mv lib$(RS_CRATE).d lib$(RS_CRATE).tmp ; echo -e "$@: $(RS_LDEPS)" | cat - lib$(RS_CRATE).tmp > lib$(RS_CRATE).d ; rm lib$(RS_CRATE).tmp ; cat *.d > .depend ;
 
 endif
 
@@ -145,6 +141,10 @@ ifneq   ("$(NO_UNIT_SO)","yes")
 	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) -l$(UNIT) $(LIBRARIES) $(SYS_LIBS);
 	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
 
+% :	%.rs $(LIBRARY) $(RS_LIBRARY)
+	$(RUSTC) -o $@ --emit=link,dep-info=$@.d $(RSFLAGS) $@.rs -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) -l$(UNIT) $(LIBRARIES) $(SYS_LIBS)" ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY) $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+
 else
 
 % :	%.c $(LIBRARY)
@@ -154,6 +154,10 @@ else
 % :	%.cc $(LIBRARY)
 	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS);
 	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+
+% :	%.rs $(LIBRARY) $(RS_LIBRARY)
+	$(RUSTC) -o $@ --emit=link,dep-info=$@.d $(RSFLAGS) $@.rs -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS)" ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY) $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
 
 endif
 
@@ -167,13 +171,9 @@ else
 	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) $(LIBRARIES) $(SYS_LIBS);
 	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   " | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
 
-endif
-
-ifneq	("$(RS_EXES)","")
-
-$(RS_EXES):	% :	%.rs $(RS_LIBRARY) $(LIBRARY) $(RS_EXTERN_LIBS)
-	$(RUSTC) $(RSFLAGS) --emit=link=$@,dep-info=$@.d $< $(if $(RS_LIBRARY),--extern $(RS_CRATE)=$(RS_LIBRARY)) $(RS_EXTERN_ARGS) $(RS_LINK_ARGS) ;
-	@cat *.d > .depend ;
+% :	%.rs $(RS_LIBRARY)
+	$(RUSTC) -o $@ --emit=link,dep-info=$@.d $(RSFLAGS) $@.rs -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) $(LIBRARIES) $(SYS_LIBS)" ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
 
 endif
 
@@ -192,7 +192,7 @@ clean cleanup::
 	@rm -f	*.d		;
 	@rm -f	*.tmp		;
 	@rm -f	core.*		;
-	@rm -f	$(OBJS:.o=) $(RS_EXES) .lib.rs	;
+	@rm -f	$(OBJS:.o=) $(RS_SRCS:.rs=) .lib.rs	;
 	@rm -f	$(SRC_ADD)	;
 	@rm -f	$(CHDRS)	;
 	@for f in $(patsubst %.h,%.rs,$(filter %.h,$(CHDRS))) ; do test ! -f $$f.bindgen || rm -f $$f $$f.d $$f.bindgen ; done ;
