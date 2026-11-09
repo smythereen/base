@@ -101,11 +101,14 @@ C implementation rule for rule:
 4. Everything stays **overridable between `include ../rules.mak` and
    `include ../targets.mak`**, as for C. A unit can change lists,
    dependencies and rules there.
-5. **Drop-in works**: a standalone source file with a main program, dropped
-   into any unit directory, builds and installs with plain `make` (and with
-   `make <name>`), exactly like a `.c` file. That holds in every kind of unit:
-   C-only, C++, no library, units with other languages, and units with
-   overrides.
+5. **Drop-in works**: this is the unit system's existing convention for most
+   source-to-product types: `.c`, `.cc`, `.cxx` and `.rs` programs go to
+   `$(BIN)`, `.sh` scripts to `$(BIN)` without the suffix, `.hsh` to
+   `$(HSH_DIR)`, and `.html` to `$(HTML_DIR)`. A standalone file of any of
+   these types, dropped into any unit directory, builds or installs with plain
+   `make`. A new type must follow the same convention. For a language with a
+   main program, that holds in every kind of unit: C-only, C++, no library,
+   units with other languages, and units with overrides.
 
 Nothing language-specific is added unless the language needs it, and each
 such addition is documented with its reason (see `RUST.md`).
