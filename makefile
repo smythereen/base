@@ -160,9 +160,9 @@ SOURCE =	etcbashrc		\
 TGT_HOST ?= localhost
 
 # the web / CGI install directories: the environment (~/.profile) or the rules.mak defaults
-CGI_BIN ?=	$(shell echo ~)/.cgi-bin
-HTML_DIR ?=	$(shell echo ~)/.html
-HSH_DIR ?=	$(shell echo ~)/.html_sh
+CGI_BIN ?=	$(shell echo ~)/cgi-bin
+HTML_DIR ?=	$(shell echo ~)/html
+HSH_DIR ?=	$(shell echo ~)/html_sh
 #
 #	Targets
 #

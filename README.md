@@ -75,6 +75,7 @@ Base is only the **project shell**:
 | `repo/` | Shell tools: `repo.sh`, `fetch-units.sh`, add/remove/list/… |
 | `.profile` / `.bash_profile` / `.bashrc` | The project login's dotfiles (base is the login directory) |
 | `bin/` | Empty install directory for programs (`~/bin`); not a unit |
+| `www/` `html/` `html_sh/` `cgi-bin/` `styles/` `images/` | Empty web / CGI administration directories (`WEB_DIR` … `IMG_DIR`); not units |
 | `cmn/` `lib/` `hlp/` `log/` `run/` `tmp/` | Install / log dirs (`.gitkeep` where empty) |
 | `RUST.md` | Optional Rust / bindgen make integration |
 | `project.repos.example` / `private.units.example` / `env.example` | Templates |
@@ -174,13 +175,21 @@ What `.profile` sets up:
   exists. `MEMORY_ALL` and `TraceLevel` are commented examples.
 - **Web / CGI administration** (project servers with HTML-based project
   administration), always exported, and not make-only: shell scripts and
-  server programs read them too. `WEB_DIR=~/.www` (the Apache document root),
-  `HTML_DIR=~/.html` (pages), `HSH_DIR=~/.html_sh` (html scripts that modify
+  server programs read them too. `WEB_DIR=~/www` (the Apache document root),
+  `HTML_DIR=~/html` (pages), `HSH_DIR=~/html_sh` (html scripts that modify
   map memory and inject msg messages to control the server and display its
-  status), `CGI_BIN=~/.cgi-bin` (setuid CGI programs), `CSS_DIR=~/.styles`
-  (`.css`, `.js`) and `IMG_DIR=~/.images`. A value already in the environment
+  status), `CGI_BIN=~/cgi-bin` (CGI programs), `CSS_DIR=~/styles`
+  (`.css`, `.js`) and `IMG_DIR=~/images`. A value already in the environment
   is kept. `rules.mak` uses the environment value too (`?=`), falling back to
-  the same defaults, and the make install rules create the directories.
+  the same defaults. The six default directories are visible (no leading dot)
+  and ship empty in base with a `.gitkeep`; their contents are gitignored and
+  none of them is a unit. Base has **no setuid or CGI install rule**: only the
+  `cgi` unit installs its programs setuid, running as the project's login.
+  **Cleaning the web directories is under review**: `make dist_clean` still
+  empties `$(CGI_BIN)`, `$(HTML_DIR)` and `$(HSH_DIR)` as before, which takes
+  a live web service down at once (unlike `~/bin`, where running programs
+  keep going until they re-spawn). A directory-swap / Apache symlink scheme
+  is being considered.
 - **`PROJECT`**: the single source of truth for the project name
   (`proj init $(PROJECT)`). It defaults to the login name (project-per-login);
   an inherited `PROJECT`, the `BOX` case, or `.profile.local` can set another.
@@ -2757,7 +2766,7 @@ GNU make + Unix `cc`/`ar`/`ranlib` on **Linux**. Public `sys` is
 ## File map (this repository)
 
 Tracked essentials: `BASE`, `LICENSE`, `LICENSES/`, `README.md`, `UNITS.md`,
-`.profile`, `.bash_profile`, `.bashrc`, `base.units`, `makefile`, `rules.mak`, `targets.mak`, `env.example`,
+`.profile`, `.bash_profile`, `.bashrc`, `base.units`, `makefile`, the empty web directories (`www`, `html`, `html_sh`, `cgi-bin`, `styles`, `images`), `rules.mak`, `targets.mak`, `env.example`,
 `project.repos.example`, `private.units.example`, `repo/*`, empty
 `bin`/`cmn`/`hlp`/`lib`/`run`/`tmp` placeholders, `.gitignore`.
 

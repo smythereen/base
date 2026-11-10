@@ -25,12 +25,12 @@ TMP =		$(shell echo ~)/tmp
 # Web / CGI administration directories.  These are run-time environment variables
 # (~/.profile exports them for shell scripts and server programs); make uses the
 # environment value when one is set, otherwise the default under ~.
-CGI_BIN ?=	$(shell echo ~)/.cgi-bin
-CSS_DIR ?=	$(shell echo ~)/.styles
-HTML_DIR ?=	$(shell echo ~)/.html
-HSH_DIR ?=	$(shell echo ~)/.html_sh
-IMG_DIR ?=	$(shell echo ~)/.images
-WEB_DIR ?=	$(shell echo ~)/.www
+CGI_BIN ?=	$(shell echo ~)/cgi-bin
+CSS_DIR ?=	$(shell echo ~)/styles
+HTML_DIR ?=	$(shell echo ~)/html
+HSH_DIR ?=	$(shell echo ~)/html_sh
+IMG_DIR ?=	$(shell echo ~)/images
+WEB_DIR ?=	$(shell echo ~)/www
 
 TGT_HOST ?=	localhost
 
@@ -124,38 +124,38 @@ CBINDGEN_FLAGS = --lang c --cpp-compat
 
 .cxx.a:
 	$(CXX) -o $* -c -MD $(CXXFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 	ar -rUs $@ $*.o
 
 .cc.a:
 	$(CXX) -o $*.o -c -MD $(CXXFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 	ar -rUs $@ $*.o
 
 .c.a:
 	$(CC) -o $*.o -c -MD $(CFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 	ar -rUs $@ $*.o
 
 .rs.a:
 	$(RUSTC) -o $@ --crate-type=staticlib -C panic=abort --emit=link,dep-info=$*.d $(RSFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 
 .cxx.o:
 	$(CXX) -o $*.o -c -MD $(CXXFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 
 .cc.o:
 	$(CXX) -o $*.o -c -MD $(CXXFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 
 .c.o:
 	$(CC) -o $*.o -c -MD $(CFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 
 .rs.o:
 	$(RUSTC) -o $*.o $(RS_CFLAGS) --emit=obj,dep-info=$*.d $(RSFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 
 .c.s:
 	$(CC) -S -MD $(CFLAGS) $< ;
@@ -168,7 +168,7 @@ CBINDGEN_FLAGS = --lang c --cpp-compat
 
 .rs.so:
 	$(RUSTC) -o $@ --crate-type=cdylib -C panic=abort --emit=link,dep-info=$*.d $(RSFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 
 #
 #	foo.h from foo.rs (cbindgen), the C header of a Rust .o/.a/.so.  An
@@ -200,31 +200,31 @@ $(LIB)/librs_std.a:
 
 .o:
 	$(CC) -o $* -MD $(CFLAGS) $< $(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES) ;
-	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
 	cp -p $@ $(BIN) ;
 
 .c:
 	$(CC) -o $* -MD $(CFLAGS) $< $(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES) ;
-	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
 	cp -p $@ $(BIN) ;
 
 .cc:
 	$(CXX) -o $* -MD $(CXXFLAGS) $< $(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES) ;
-	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
 	cp -p $@ $(BIN) ;
 
 .cxx:
 	$(CXX) -o $* -MD $(CXXFLAGS) $< $(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES) ;
-	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
 	cp -p $@ $(BIN) ;
 
 .rs:
 	$(RUSTC) -o $* --emit=link,dep-info=$*.d $(RSFLAGS) $< -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES)" ;
-	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
 	cp -p $@ $(BIN) ;
 

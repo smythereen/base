@@ -121,23 +121,25 @@ def_dir	SCP_PATH	${HOME}/scp/
 
 #
 #	Web / CGI administration (project servers with HTML-based administration).
-#	Used by shell scripts and server programs, and by the make install rules,
-#	which create the directories.  A value already set (environment, or the BOX
-#	case / ~/.profile.local on a re-source) is kept.
+#	Used by shell scripts and server programs, and by the make install rules.
+#	The default directories are visible (no leading dot) and ship empty with
+#	base (.gitkeep); none of them is a unit.  A value already set (environment,
+#	or the BOX case / ~/.profile.local on a re-source) is kept.
 #	  WEB_DIR	the Apache document root of the project's web server
 #	  HTML_DIR	installed .html pages
 #	  HSH_DIR	html scripts (.hsh installed as .sh) that modify map memory and
 #			inject msg messages to control the server and display its status
-#	  CGI_BIN	setuid CGI programs
+#	  CGI_BIN	CGI programs (the cgi unit installs them setuid to the project login;
+#			base has no setuid or CGI install rule)
 #	  CSS_DIR	style sheets and JavaScript (.css, .js)
 #	  IMG_DIR	images (bmp gif jpg ico)
 #
-define	WEB_DIR		"${WEB_DIR:-${HOME}/.www}"
-define	HTML_DIR	"${HTML_DIR:-${HOME}/.html}"
-define	HSH_DIR		"${HSH_DIR:-${HOME}/.html_sh}"
-define	CGI_BIN		"${CGI_BIN:-${HOME}/.cgi-bin}"
-define	CSS_DIR		"${CSS_DIR:-${HOME}/.styles}"
-define	IMG_DIR		"${IMG_DIR:-${HOME}/.images}"
+define	WEB_DIR		"${WEB_DIR:-${HOME}/www}"
+define	HTML_DIR	"${HTML_DIR:-${HOME}/html}"
+define	HSH_DIR		"${HSH_DIR:-${HOME}/html_sh}"
+define	CGI_BIN		"${CGI_BIN:-${HOME}/cgi-bin}"
+define	CSS_DIR		"${CSS_DIR:-${HOME}/styles}"
+define	IMG_DIR		"${IMG_DIR:-${HOME}/images}"
 #
 # Unit data directories are added the same way, for example:
 # def_dir LERG_PATH	/lerg/

@@ -70,7 +70,7 @@ $(RS_LIBRARY):	$(L_RS_SRCS)
 	@-mkdir -p -m 775 $(LIB) && test -f $@ && mkdir -p $(LIB)/.old && cp -fp $@ $(LIB)/.old || exit 0 ;
 	@for f in $(L_RS_SRCS) ; do echo "#[path = \"$$f\"] pub mod `basename $$f .rs | tr -c 'A-Za-z0-9_\n' _`;" ; done > .lib.rs ;
 	$(RUSTC) -o $@ --crate-type=rlib --crate-name $(RS_CRATE) --emit=link,dep-info=lib$(RS_CRATE).d $(RSFLAGS) .lib.rs -L$(LIB) $(RS_EXTERN_ARGS) ;
-	@mv lib$(RS_CRATE).d lib$(RS_CRATE).tmp ; echo -e "$@: $(RS_LDEPS)" | cat - lib$(RS_CRATE).tmp > lib$(RS_CRATE).d ; rm lib$(RS_CRATE).tmp ; cat *.d > .depend ;
+	@mv lib$(RS_CRATE).d lib$(RS_CRATE).tmp ; echo -e "$@: $(RS_LDEPS)" | cat - lib$(RS_CRATE).tmp > lib$(RS_CRATE).d ; rm lib$(RS_CRATE).tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 endif
 
@@ -151,29 +151,29 @@ ifneq   ("$(NO_UNIT_SO)","yes")
 
 % :	%.c $(LIBRARY)
 	$(CC) -MD -o $@ $(CFLAGS) $@.c $(LDFLAGS) -l$(UNIT) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 % :	%.cc $(LIBRARY)
 	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) -l$(UNIT) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 % :	%.rs $(LIBRARY) $(RS_LIBRARY)
 	$(RUSTC) -o $@ --emit=link,dep-info=$@.d $(RSFLAGS) $@.rs -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) -l$(UNIT) $(LIBRARIES) $(SYS_LIBS)" ;
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY) $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY) $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 else
 
 % :	%.c $(LIBRARY)
 	$(CC) -MD -o $@ $(CFLAGS) $@.c $(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 % :	%.cc $(LIBRARY)
 	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 % :	%.rs $(LIBRARY) $(RS_LIBRARY)
 	$(RUSTC) -o $@ --emit=link,dep-info=$@.d $(RSFLAGS) $@.rs -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS)" ;
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY) $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY) $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 endif
 
@@ -181,15 +181,15 @@ else
 
 % :	%.c
 	$(CC) -MD -o $@ $(CFLAGS) $@.c $(LDFLAGS) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   " | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   " | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 % :	%.cc
 	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   " | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   " | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 % :	%.rs $(RS_LIBRARY)
 	$(RUSTC) -o $@ --emit=link,dep-info=$@.d $(RSFLAGS) $@.rs -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) $(LIBRARIES) $(SYS_LIBS)" ;
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 endif
 
