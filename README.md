@@ -338,7 +338,9 @@ first. Exercised with `HOME=$PWD make` against the live catalog on Linux x86-64.
 
 The project worker's starter list (`GET /projects/NONE`) stays the nine
 core units. The catalog worker also lists the optional messaging units
-`addr`, `msg` and `near` (same JSON shape). There is no public
+`addr`, `msg` and `near`, and the `trigger` unit (same JSON shape).
+`./repo/repo.sh add trigger` (and `addr` / `msg` / `near`) resolves without
+a private URL. There is no public
 create/delete/governance API documented in base.
 
 ---
