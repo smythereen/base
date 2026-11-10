@@ -62,6 +62,7 @@ The project login's dotfiles (`.profile` in the base repo, sourced by `.bash_pro
 | `LD_LIBRARY_PATH` | Includes `~/lib` (only needed for shared libraries; they are off by default) |
 | `FILE_PATH`, `DATA_PATH`, `PIPE_PATH`, `MEMORY_PATH`, `ELOG_FILE` ... | Run-time paths under `~/run/`. The `msg` unit installs its `*.msg` files into `$(FILE_PATH)` |
 | `KILL_PATH` | `~/bin/`; used by `far/farkill` |
+| `WEB_DIR`, `HTML_DIR`, `HSH_DIR`, `CGI_BIN`, `CSS_DIR`, `IMG_DIR` | Web / CGI administration: `~/.www` (Apache document root), `~/.html` (pages), `~/.html_sh` (html scripts that modify map memory and inject msg messages to control the server and show its status), `~/.cgi-bin` (setuid CGI programs), `~/.styles` (`.css`, `.js`), `~/.images`. Run-time variables for shell scripts and server programs, not make-only: make's install rules use the environment value when set, otherwise these defaults |
 | `PEERS`, `TGT_HOST` | Only for the `copy_to_*` targets (section 7) |
 | `PROJECT` | Project name, used by the source-control tools |
 
@@ -81,8 +82,9 @@ Building the units that need nothing from the profile works with just `CC` and `
   one test program, and `junk`, which only has programs). If any library source is `.cc`, C++ is used for the unit's shared library.
 - **Headers:** `*.h` in the unit directory. Only the ones named in `CHDRS` are exported (section 4).
 - **Scripts and web files:** `*.sh` is installed into `~/bin` without the `.sh` (mode 775). `*.hsh`,
-  `*.html`, `*.css`, `*.js` and the image types `bmp gif jpg ico` are installed into `~/.html_sh`, `~/.html`,
-  `~/.styles` (`.css` and `.js`) and `~/.images`.
+  `*.html`, `*.css`, `*.js` and the image types `bmp gif jpg ico` are installed into `$(HSH_DIR)` (`~/.html_sh`),
+  `$(HTML_DIR)` (`~/.html`), `$(CSS_DIR)` (`~/.styles`, `.css` and `.js`) and `$(IMG_DIR)` (`~/.images`); the
+  environment values win when set (section 2).
 - **Dependencies:** every compile uses `-MD`, so each `x.c` leaves an `x.d` file listing the headers it read.
   `cat *.d > .depend` merges them and the unit makefile ends with `include .depend`. Change one header and
   `make` rebuilds exactly the files that use it. For each program, the `.d` file also records the

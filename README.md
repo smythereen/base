@@ -172,6 +172,15 @@ What `.profile` sets up:
   **`KILL_PATH`** (`~/bin/`, used by `far/farkill`), and `SCP_PATH` (only if
   `~/scp` exists). Each `def_dir` path is exported only when its directory
   exists. `MEMORY_ALL` and `TraceLevel` are commented examples.
+- **Web / CGI administration** (project servers with HTML-based project
+  administration), always exported, and not make-only: shell scripts and
+  server programs read them too. `WEB_DIR=~/.www` (the Apache document root),
+  `HTML_DIR=~/.html` (pages), `HSH_DIR=~/.html_sh` (html scripts that modify
+  map memory and inject msg messages to control the server and display its
+  status), `CGI_BIN=~/.cgi-bin` (setuid CGI programs), `CSS_DIR=~/.styles`
+  (`.css`, `.js`) and `IMG_DIR=~/.images`. A value already in the environment
+  is kept. `rules.mak` uses the environment value too (`?=`), falling back to
+  the same defaults, and the make install rules create the directories.
 - **`PROJECT`**: the single source of truth for the project name
   (`proj init $(PROJECT)`). It defaults to the login name (project-per-login);
   an inherited `PROJECT`, the `BOX` case, or `.profile.local` can set another.

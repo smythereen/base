@@ -16,6 +16,13 @@ core.*
 /run/*
 /tmp/*
 /log/*
+# web / CGI administration directories (installed by make, or server data)
+/.cgi-bin/
+/.html/
+/.html_sh/
+/.styles/
+/.images/
+/.www/
 !/bin/.gitkeep
 !/lib/.gitkeep
 !/cmn/.gitkeep

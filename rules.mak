@@ -22,12 +22,15 @@ LOG =		$(shell echo ~)/log
 RUN =		$(shell echo ~)/run
 TMP =		$(shell echo ~)/tmp
 
-CGI_BIN =	$(shell echo ~)/.cgi-bin
-CSS_DIR =	$(shell echo ~)/.styles
-HTML_DIR =	$(shell echo ~)/.html
-HSH_DIR =	$(shell echo ~)/.html_sh
-IMG_DIR =	$(shell echo ~)/.images
-WEB_DIR =	$(shell echo ~)/.www
+# Web / CGI administration directories.  These are run-time environment variables
+# (~/.profile exports them for shell scripts and server programs); make uses the
+# environment value when one is set, otherwise the default under ~.
+CGI_BIN ?=	$(shell echo ~)/.cgi-bin
+CSS_DIR ?=	$(shell echo ~)/.styles
+HTML_DIR ?=	$(shell echo ~)/.html
+HSH_DIR ?=	$(shell echo ~)/.html_sh
+IMG_DIR ?=	$(shell echo ~)/.images
+WEB_DIR ?=	$(shell echo ~)/.www
 
 TGT_HOST ?=	localhost
 

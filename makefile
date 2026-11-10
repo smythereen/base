@@ -158,6 +158,11 @@ SOURCE =	etcbashrc		\
 		.vimrc
 
 TGT_HOST ?= localhost
+
+# the web / CGI install directories: the environment (~/.profile) or the rules.mak defaults
+CGI_BIN ?=	$(shell echo ~)/.cgi-bin
+HTML_DIR ?=	$(shell echo ~)/.html
+HSH_DIR ?=	$(shell echo ~)/.html_sh
 #
 #	Targets
 #
@@ -277,12 +282,9 @@ dir:
 	@-mkdir $(UNITS) 1>/dev/null 2>&1 ;
 
 dist_clean::
-	@-rm	-rf	.cgi-bin/.old	;
-	@-rm	-f	.cgi-bin/*	;
-	@-rm	-rf	.html/.old	;
-	@-rm	-f	.html/*		;
-	@-rm	-rf	.html_sh/.old	;
-	@-rm	-f	.html_sh/*	;
+	@-$(if $(strip $(CGI_BIN)),rm	-rf	$(CGI_BIN)/.old	; rm	-f	$(CGI_BIN)/*	,true) ;
+	@-$(if $(strip $(HTML_DIR)),rm	-rf	$(HTML_DIR)/.old	; rm	-f	$(HTML_DIR)/*	,true) ;
+	@-$(if $(strip $(HSH_DIR)),rm	-rf	$(HSH_DIR)/.old	; rm	-f	$(HSH_DIR)/*	,true) ;
 	@-rm	-f	bin/.K* 	;
 	@-rm	-rf	bin/.old	;
 	@-rm	-rf	cmn/*		;
