@@ -53,7 +53,7 @@ To build somewhere other than the real home directory, set `HOME` for the make c
 What you need installed: GNU make, gcc and g++ (or another compiler, see section 9), `ar`, GNU grep and **bash**.
 `rules.mak` sets `SHELL := /bin/bash`, so every recipe runs under bash whatever `/bin/sh` is.
 
-The `.bash_profile` of the project login normally sets:
+The project login's dotfiles (`.profile` in the base repo, sourced by `.bash_profile`) set:
 
 | Variable | Used for |
 |---|---|
@@ -61,10 +61,12 @@ The `.bash_profile` of the project login normally sets:
 | `PATH` | Must include `~/bin` to run what you build |
 | `LD_LIBRARY_PATH` | Includes `~/lib` (only needed for shared libraries; they are off by default) |
 | `FILE_PATH`, `DATA_PATH`, `PIPE_PATH`, `MEMORY_PATH`, `ELOG_FILE` ... | Run-time paths under `~/run/`. The `msg` unit installs its `*.msg` files into `$(FILE_PATH)` |
+| `KILL_PATH` | `~/bin/`; used by `far/farkill` |
+| `WEB_DIR`, `HTML_DIR`, `HSH_DIR`, `CGI_BIN`, `CSS_DIR`, `IMG_DIR` | Web / CGI administration: `~/www` (Apache document root), `~/html` (pages), `~/html_sh` (html scripts that modify map memory and inject msg messages to control the server and show its status), `~/cgi-bin` (CGI programs; only the `cgi` unit installs them, setuid to the project login), `~/styles` (`.css`, `.js`), `~/images`. Run-time variables for shell scripts and server programs, not make-only: make's install rules use the environment value when set, otherwise these defaults. The directories ship empty in base (visible, `.gitkeep`) and are not units |
 | `PEERS`, `TGT_HOST` | Only for the `copy_to_*` targets (section 7) |
 | `PROJECT` | Project name, used by the source-control tools |
 
-Building the units that need nothing from `.bash_profile` works with just `CC` and `CXX` (or the defaults).
+Building the units that need nothing from the profile works with just `CC` and `CXX` (or the defaults).
 
 ## 3. How a unit is discovered
 
@@ -80,8 +82,9 @@ Building the units that need nothing from `.bash_profile` works with just `CC` a
   one test program, and `junk`, which only has programs). If any library source is `.cc`, C++ is used for the unit's shared library.
 - **Headers:** `*.h` in the unit directory. Only the ones named in `CHDRS` are exported (section 4).
 - **Scripts and web files:** `*.sh` is installed into `~/bin` without the `.sh` (mode 775). `*.hsh`,
-  `*.html`, `*.css`, `*.js` and the image types `bmp gif jpg ico` are installed into `~/.html_sh`, `~/.html`,
-  `~/.styles` (`.css` and `.js`) and `~/.images`.
+  `*.html`, `*.css`, `*.js` and the image types `bmp gif jpg ico` are installed into `$(HSH_DIR)` (`~/html_sh`),
+  `$(HTML_DIR)` (`~/html`), `$(CSS_DIR)` (`~/styles`, `.css` and `.js`) and `$(IMG_DIR)` (`~/images`); the
+  environment values win when set (section 2).
 - **Dependencies:** every compile uses `-MD`, so each `x.c` leaves an `x.d` file listing the headers it read.
   `cat *.d > .depend` merges them and the unit makefile ends with `include .depend`. Change one header and
   `make` rebuilds exactly the files that use it. For each program, the `.d` file also records the
@@ -126,10 +129,11 @@ Run `make [target]` inside a unit, or from the root for all units. With no targe
 
 | Target | What it does in one unit |
 |---|---|
-| `all` (default) | `.depend source header library product`, in that order |
+| `all` (default) | `.depend source`, then `header` → `bindings` → `library` → `product` |
 | `source` | Builds `SRC_ADD` (extra generated sources), if any, and reports completion |
 | `source_list` | Does nothing but report completion. It exists so the root `source_list` phase finds the target in every unit |
 | `header` | Copies each file in `CHDRS` to `~/cmn` with `cp -fp` when it is newer |
+| `bindings` | Optional: generate `~/cmn/*.rs` from installed `*.h` when `bindgen` is installed (`RS_BINDGEN=required` makes a missing bindgen an error; see `RUST.md`). `*.def` in `CHDRS` are installed but are not bindgen roots |
 | `library` | Compiles the library sources and adds them to `~/lib/lib<unit>.a` with `ar -rUs`. The previous library is first saved in `~/lib/.old` |
 | `product` | Builds every program in the unit directory (linking the unit library and `LIBRARIES`), and installs it in `~/bin`. The previous copy is moved to `~/bin/.old`. Installs scripts and web files too |
 | `cleanup` / `clean` | The same rule under two names. Deletes `*.o *.a *.d *.tmp core.*` and the built programs in the unit directory, deletes the unit's exported headers from `~/cmn`, moves its installed programs to `~/bin/.old` and its library to `~/lib/.old`, and empties `.depend`. It does not delete anything for good |
@@ -138,14 +142,14 @@ Run `make [target]` inside a unit, or from the root for all units. With no targe
 Every target prints `Unit <name>: <target> complete!` when it finishes, even when the commands before it
 ignored an error (see section 10).
 
-**Running them from the root.** The master `makefile` has `all: header library product`. Each phase runs over
+**Running them from the root.** The master `makefile` has `all: header bindings library product`. Each phase runs over
 **all units** before the next phase starts, so the order is: every unit's `header`, then every unit's
-`library`, then every unit's `product`. This is what lets units depend on each other's headers and
+`bindings`, then `library`, then `product`. This is what lets units depend on each other's headers and
 libraries (even circularly, as `sys`, `map`, `sem` and `far` do) with no ordering between units: all
 headers are in `~/cmn` before any compile, and all libraries exist before any program links.
 
-The root also runs `header`, `library`, `product`, `cleanup`, `clean`, `source_list` and `dist_clean`
-across the units. A unit whose makefile is not a standard unit makefile must still answer these phases;
+The root also runs `header`, `bindings`, `library`, `product`, `cleanup`, `clean`, `source_list` and `dist_clean`
+across the units. Per-unit logs go under `log/<phase>/<unit>.log`; combined `<phase>.log` stays in the project root. A unit whose makefile is not a standard unit makefile must still answer these phases;
 the cheap way is a **dummy (no-op) target** that only prints `Unit <name>: <target> complete!`, as
 `source_list` does in `targets.mak`. A unit that really uses the unit system (`c-saw`, `load-saw`) needs none. For each one, it does `make -C <unit> -S <target>` and writes the output to
 `<target>.log` in the root (`header.log`, `library.log`, `product.log`, `cleanup.log`).
@@ -180,6 +184,13 @@ No makefile change. It is linked with the unit library and `LIBRARIES`, then ins
 3. Add a `LICENSE` file (section 8) and SPDX lines to every file.
 4. `make -C ~/myunit`. The root `makefile` finds the unit by itself on the next full build; no list to edit.
    Build the units named in `LIBRARIES` first, or at least have their headers in `~/cmn` and libraries in `~/lib`.
+
+**A new language** follows the "Adding a language" rule in `README.md`. It
+mirrors the C rules exactly: a no-dependency suffix rule in `rules.mak`, lists
+next to the C lists, and dependency and library rules in `targets.mak` where
+the C ones are, all overridable between the includes. A standalone source file
+dropped into any unit builds and installs with plain `make`, just like a `.c`
+file. Rust is the example; see `RUST.md`.
 
 ## 7. Working on a subset of units
 
@@ -242,7 +253,7 @@ their own extra targets: `make -C c-saw test` (also `test-far`), `make -C load-s
 
 - **The root build keeps going on purpose.** With hundreds or thousands of units you want one quick build that
   shows which units are good and which are bad, not a `make` that stops at the first error. So the root
-  `make` always exits 0, and each phase writes `<target>.log` (`header.log`, `library.log`, `product.log`,
+  `make` always exits 0, and each phase writes `<target>.log` (`header.log`, `bindings.log`, `library.log`, `product.log`,
   `cleanup.log`) in the root. **Scan the logs** after a build:
   `grep -n 'warning:\|error:\|\*\*\*' *.log`. The plain words "warn" and "error" also match file names such as
   `syserror.c` and `syswarn.c`, so the patterns above are more precise. A failing unit shows the compiler

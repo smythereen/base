@@ -2,6 +2,7 @@
 *.o
 *.a
 *.so
+*.rlib
 *.d
 .depend
 *.tmp
@@ -14,12 +15,27 @@ core.*
 /cmn/*
 /run/*
 /tmp/*
+/log/*
+# web / CGI administration directories: tracked empty (.gitkeep), contents installed
+/cgi-bin/*
+/html/*
+/html_sh/*
+/styles/*
+/images/*
+/www/*
+!/cgi-bin/.gitkeep
+!/html/.gitkeep
+!/html_sh/.gitkeep
+!/styles/.gitkeep
+!/images/.gitkeep
+!/www/.gitkeep
 !/bin/.gitkeep
 !/lib/.gitkeep
 !/cmn/.gitkeep
 !/cmn/LICENSE
 !/run/.gitkeep
 !/tmp/.gitkeep
+!/log/.gitkeep
 # fetched units are separate git clones: list them in .git/info/exclude of the project tree
 # the project's own lists live in the project root, never in repo/ (the repo unit is public and
 # shared by all projects).  They belong to the project, not to the base repo; the *.example files
@@ -39,8 +55,10 @@ core.*
 .secrets/
 *.key
 *.pem
-.bash_profile
-.bashrc
+# the project dotfiles (.profile .bash_profile .bashrc) are tracked; personal and
+# secret settings go in these, which are not
+.profile.local
+.bashrc.local
 *.save
 *.old
 .old/

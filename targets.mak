@@ -8,12 +8,22 @@
 
 LDEPS = $(patsubst %.a,  %.a \0134\012,$(patsubst -l%,$(LIB)/lib%.a,$(LIBRARIES)))
 
+RS_LDEPS = $(foreach u,$(subst -,_,$(RS_EXTERN)),$(LIB)/lib$(u).rlib)
+
+RS_STD = $(if $(filter $(patsubst %.rs,%.o,$(wildcard *.rs)),$(L_OBJS) $(OBJS) $(LIBRARIES)),$(RS_STD_LIBS))
+
 #
 #	Common Targets
 #
 
 .PHONY:	all
-all::	.depend source header library product
+# Sequential phases via sub-makes so header completes before bindings, etc.
+# (GNU make forbids mixing : and :: on the same target name.)
+all::	.depend source
+	@$(MAKE) header
+	@$(MAKE) bindings
+	@$(MAKE) library
+	@$(MAKE) product
 
 .PHONY:	source
 source::		$(SRC_ADD)
@@ -24,7 +34,7 @@ header::		$(CHDRS)
 	$(ECHO)	"	Unit	$(UNIT): $@ complete!"
 
 .PHONY:	library
-library::	$(LIBRARY) $(S_LIBRARY)
+library::	$(LIBRARY) $(S_LIBRARY) $(RS_LIBRARY)
 	$(ECHO)	"	Unit	$(UNIT): $@ complete!"
 
 .PHONY:	product
@@ -54,9 +64,44 @@ endif
 
 endif
 
+ifneq	("$(L_RS_SRCS)","")
+
+$(RS_LIBRARY):	$(L_RS_SRCS)
+	@-mkdir -p -m 775 $(LIB) && test -f $@ && mkdir -p $(LIB)/.old && cp -fp $@ $(LIB)/.old || exit 0 ;
+	@for f in $(L_RS_SRCS) ; do echo "#[path = \"$$f\"] pub mod `basename $$f .rs | tr -c 'A-Za-z0-9_\n' _`;" ; done > .lib.rs ;
+	$(RUSTC) -o $@ --crate-type=rlib --crate-name $(RS_CRATE) --emit=link,dep-info=lib$(RS_CRATE).d $(RSFLAGS) .lib.rs -L$(LIB) $(RS_EXTERN_ARGS) ;
+	@mv lib$(RS_CRATE).d lib$(RS_CRATE).tmp ; echo -e "$@: $(RS_LDEPS)" | cat - lib$(RS_CRATE).tmp > lib$(RS_CRATE).d ; rm lib$(RS_CRATE).tmp ; cat *.d > .depend 2>/dev/null ; true ;
+
+endif
+
 $(HDR)/%.h :	%.h
 	@mkdir -p -m 775 $(HDR) ;
 	cp -fp	$? $@
+
+#	An installed $(HDR)/foo.h with no foo.h here and not in CHDRS is another
+#	unit's header: an explicit empty rule, so it is never remade here.
+#	Otherwise the .rs.h rule would match it from the bindgen $(HDR)/foo.rs
+#	(a circular dependency) or through a chain from a local foo.rs.
+
+OTHER_HDRS :=	$(filter-out $(CHDRS) $(addprefix $(HDR)/,$(HDRS)),$(wildcard $(HDR)/*.h))
+
+$(OTHER_HDRS): ;
+
+#	Each exported $(HDR)/foo.h names its foo.h, so the rule above wins even
+#	when foo.h is still to be made from foo.rs (.rs.h).
+
+$(filter $(HDR)/%.h,$(CHDRS)) :	$(HDR)/%.h :	%.h
+
+#
+#	Rust bindings phase: one $(HDR)/foo.rs per exported foo.h (rule in rules.mak)
+#
+
+RS_BINDINGS :=	$(if $(BINDGEN),$(patsubst %.h,%.rs,$(filter %.h,$(CHDRS))))
+
+.PHONY:	bindings
+bindings::	$(CHDRS) $(RS_BINDINGS)
+	@test -n "$(BINDGEN)" -o "$(RS_BINDGEN)" != required || { echo "error: bindgen not found (RS_BINDGEN=required)" >&2 ; exit 1 ; }
+	$(ECHO)	"	Unit	$(UNIT): $@ complete!"
 
 $(HDR)/%.dat :	%.dat
 	@mkdir -p -m 775 $(HDR) ;
@@ -105,34 +150,52 @@ ifneq	("$(L_OBJS)"," ")
 ifneq   ("$(NO_UNIT_SO)","yes")
 
 % :	%.c $(LIBRARY)
-	$(CC) -MD -o $@ $(CFLAGS) $@.c $(LDFLAGS) -l$(UNIT) $(LIBRARIES) $(SYS_LIBS);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	$(CC) -MD -o $@ $(CFLAGS) $@.c $(LDFLAGS) -l$(UNIT) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 % :	%.cc $(LIBRARY)
-	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) -l$(UNIT) $(LIBRARIES) $(SYS_LIBS);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) -l$(UNIT) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
+
+% :	%.rs $(LIBRARY) $(RS_LIBRARY)
+	$(RUSTC) -o $@ --emit=link,dep-info=$@.d $(RSFLAGS) $@.rs -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) -l$(UNIT) $(LIBRARIES) $(SYS_LIBS)" ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY) $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 else
 
 % :	%.c $(LIBRARY)
-	$(CC) -MD -o $@ $(CFLAGS) $@.c $(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	$(CC) -MD -o $@ $(CFLAGS) $@.c $(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 % :	%.cc $(LIBRARY)
-	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
+
+% :	%.rs $(LIBRARY) $(RS_LIBRARY)
+	$(RUSTC) -o $@ --emit=link,dep-info=$@.d $(RSFLAGS) $@.rs -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) $(LIBRARY) $(LIBRARIES) $(SYS_LIBS)" ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(LIBRARY) $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 endif
 
 else
 
 % :	%.c
-	$(CC) -MD -o $@ $(CFLAGS) $@.c $(LDFLAGS) $(LIBRARIES) $(SYS_LIBS);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   " | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	$(CC) -MD -o $@ $(CFLAGS) $@.c $(LDFLAGS) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   " | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 
 % :	%.cc
-	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) $(LIBRARIES) $(SYS_LIBS);
-	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   " | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	$(CXX) -MD -o $@ $(CXXFLAGS) $@.cc $(LDFLAGS) $(LIBRARIES) $(SYS_LIBS) $(RS_STD);
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   " | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
+
+% :	%.rs $(RS_LIBRARY)
+	$(RUSTC) -o $@ --emit=link,dep-info=$@.d $(RSFLAGS) $@.rs -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) $(LIBRARIES) $(SYS_LIBS)" ;
+	@mv $@.d $@.tmp ; echo -e "$@: $(LDEPS)   $(RS_LDEPS) $(RS_LIBRARY)" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
+
+endif
+
+ifneq	("$(filter %.a,$(RS_STD))","")
+
+$(OBJS:.o=):	$(filter %.a,$(RS_STD))
 
 endif
 
@@ -151,13 +214,15 @@ clean cleanup::
 	@rm -f	*.d		;
 	@rm -f	*.tmp		;
 	@rm -f	core.*		;
-	@rm -f	$(OBJS:.o=)	;
+	@rm -f	$(OBJS:.o=) $(RS_SRCS:.rs=) .lib.rs	;
 	@rm -f	$(SRC_ADD)	;
 	@rm -f	$(CHDRS)	;
+	@for f in $(patsubst %.h,%.rs,$(filter %.h,$(CHDRS))) ; do test ! -f $$f.bindgen || rm -f $$f $$f.d $$f.bindgen ; done ;
 	@-mkdir -p -m 770 $(BIN)/.old && mv -f $(EXECUTABLES)	$(BIN)/.old 2>/dev/null ; exit 0 ;
 	@-mkdir -p -m 770 $(LIB)/.old && mv -f $(LIBRARY)	$(LIB)/.old 2>/dev/null ; exit 0 ;
 	@-mkdir -p -m 770 $(LIB)/.old && mv -f $(LIBRARY2)	$(LIB)/.old 2>/dev/null ; exit 0 ;
 	@-mkdir -p -m 770 $(LIB)/.old && mv -f $(S_LIBRARY)	$(LIB)/.old 2>/dev/null ; exit 0 ;
+	@-mkdir -p -m 770 $(LIB)/.old && mv -f $(RS_LIBRARY)	$(LIB)/.old 2>/dev/null ; exit 0 ;
 	@echo -e "\c" > .depend ;
 	$(ECHO)	"	Unit	$(UNIT): $@ complete!" ;
 

@@ -18,15 +18,19 @@ BIN =		$(shell echo ~)/bin
 HDR =		$(shell echo ~)/cmn
 HLP =		$(shell echo ~)/hlp
 LIB =		$(shell echo ~)/lib
+LOG =		$(shell echo ~)/log
 RUN =		$(shell echo ~)/run
 TMP =		$(shell echo ~)/tmp
 
-CGI_BIN =	$(shell echo ~)/.cgi-bin
-CSS_DIR =	$(shell echo ~)/.styles
-HTML_DIR =	$(shell echo ~)/.html
-HSH_DIR =	$(shell echo ~)/.html_sh
-IMG_DIR =	$(shell echo ~)/.images
-WEB_DIR =	$(shell echo ~)/.www
+# Web / CGI administration directories.  These are run-time environment variables
+# (~/.profile exports them for shell scripts and server programs); make uses the
+# environment value when one is set, otherwise the default under ~.
+CGI_BIN ?=	$(shell echo ~)/cgi-bin
+CSS_DIR ?=	$(shell echo ~)/styles
+HTML_DIR ?=	$(shell echo ~)/html
+HSH_DIR ?=	$(shell echo ~)/html_sh
+IMG_DIR ?=	$(shell echo ~)/images
+WEB_DIR ?=	$(shell echo ~)/www
 
 TGT_HOST ?=	localhost
 
@@ -91,67 +95,136 @@ NO_UNIT_SO	:= yes
 
 LDFLAGS =	-L$(LIB)
 
+
+#
+#	Rust (optional, see RUST.md).  RSFLAGS is the CFLAGS of rustc, RS_EXTERN
+#	the LIBRARIES of Rust (other units' ~/lib/lib<unit>.rlib), and bindgen
+#	makes $(HDR)/foo.rs from each installed $(HDR)/foo.h.
+#
+
+RUSTC ?=	rustc
+RSFLAGS =	-g --edition=2021
+RS_EXTERN =
+RS_EXTERN_ARGS = $(foreach u,$(subst -,_,$(RS_EXTERN)),--extern $(u)=$(LIB)/lib$(u).rlib)
+RS_CFLAGS =	--crate-type=lib -C panic=abort
+RS_STD_LIBS =	$(LIB)/librs_std.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+RS_BINDGEN ?=	auto
+BINDGEN ?=	$(shell PATH="$(HOME)/.cargo/bin:$$PATH" command -v bindgen 2>/dev/null)
+BINDGEN_FLAGS =
+RS_BINDGEN_CFLAGS =
+CBINDGEN ?=	$(shell PATH="$(HOME)/.cargo/bin:$$PATH" command -v cbindgen 2>/dev/null)
+CBINDGEN_FLAGS = --lang c --cpp-compat
+
 #
 #	Common Rules
 #
 
 .SUFFIXES:
-.SUFFIXES:	.so .a .o .s .i .c .cc .cxx .h .hxx .dat .class
+.SUFFIXES:	.so .a .o .s .i .c .cc .cxx .rs .h .hxx .dat .class .ll
 
 .cxx.a:
 	$(CXX) -o $* -c -MD $(CXXFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 	ar -rUs $@ $*.o
 
 .cc.a:
 	$(CXX) -o $*.o -c -MD $(CXXFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 	ar -rUs $@ $*.o
 
 .c.a:
 	$(CC) -o $*.o -c -MD $(CFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 	ar -rUs $@ $*.o
+
+.rs.a:
+	$(RUSTC) -o $@ --crate-type=staticlib -C panic=abort --emit=link,dep-info=$*.d $(RSFLAGS) $< ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 
 .cxx.o:
 	$(CXX) -o $*.o -c -MD $(CXXFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 
 .cc.o:
 	$(CXX) -o $*.o -c -MD $(CXXFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 
 .c.o:
 	$(CC) -o $*.o -c -MD $(CFLAGS) $< ;
-	@cat *.d > .depend ;
+	@cat *.d > .depend 2>/dev/null ; true ;
+
+.rs.o:
+	$(RUSTC) -o $*.o $(RS_CFLAGS) --emit=obj,dep-info=$*.d $(RSFLAGS) $< ;
+	@cat *.d > .depend 2>/dev/null ; true ;
 
 .c.s:
 	$(CC) -S -MD $(CFLAGS) $< ;
+
+.rs.s:
+	$(RUSTC) -o $*.s $(RS_CFLAGS) --emit=asm,dep-info=$*.d $(RSFLAGS) $< ;
+
+.rs.ll:
+	$(RUSTC) -o $*.ll $(RS_CFLAGS) --emit=llvm-ir,dep-info=$*.d $(RSFLAGS) $< ;
+
+.rs.so:
+	$(RUSTC) -o $@ --crate-type=cdylib -C panic=abort --emit=link,dep-info=$*.d $(RSFLAGS) $< ;
+	@cat *.d > .depend 2>/dev/null ; true ;
+
+#
+#	foo.h from foo.rs (cbindgen), the C header of a Rust .o/.a/.so.  An
+#	ordinary suffix rule: once foo.h is a prerequisite (.depend, CHDRS), a
+#	newer foo.rs remakes foo.h, then the C objects that include it.  A
+#	foo.h without its foo.h.cbindgen marker is handwritten: a build leaves
+#	it alone with a note, and only "make foo.h" reports an error.  A
+#	bindgen foo.rs (foo.rs.bindgen) is never a source; $(HDR)/foo.h has its
+#	own rules in targets.mak.  cbindgen is needed only to write a header.
+#
+
+.rs.h:
+	@if [ -f $<.bindgen ]; then exit 0; fi ; \
+	if [ -f $@ ] && [ ! -f $@.cbindgen ]; then \
+		if [ -n "$(filter $@,$(MAKECMDGOALS))" ]; then echo "error: $@ is handwritten (no $@.cbindgen), not overwritten" >&2; exit 1; fi ; \
+		echo "note: $@ is handwritten (no $@.cbindgen), not made from $<" >&2; exit 0; \
+	fi ; \
+	test -n "$(CBINDGEN)" || { echo "error: cbindgen not found (cargo install cbindgen) for $@" >&2 ; exit 1 ; } ; \
+	echo "$(CBINDGEN) $(CBINDGEN_FLAGS) -o $@ $<" ; \
+	$(CBINDGEN) $(CBINDGEN_FLAGS) -o $@.tmp $< || { rm -f $@.tmp ; exit 1 ; } ; \
+	g=`echo $(*F)_H | tr a-z.- A-Z__` ; { echo "#ifndef $$g" ; echo "#define $$g" ; cat $@.tmp ; echo "#endif" ; } > $@ ; rm -f $@.tmp ; touch $@.cbindgen
+
+$(LIB)/librs_std.a:
+	@-mkdir -p -m 775 $(LIB) ;
+	echo "" | $(RUSTC) -o $@ --crate-type=staticlib --crate-name rs_std -C panic=abort $(RSFLAGS) - ;
 
 .c.i:
 	$(CC) -P $(CFLAGS) $< ;
 
 .o:
 	$(CC) -o $* -MD $(CFLAGS) $< $(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES) ;
-	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
 	cp -p $@ $(BIN) ;
 
 .c:
 	$(CC) -o $* -MD $(CFLAGS) $< $(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES) ;
-	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
 	cp -p $@ $(BIN) ;
 
 .cc:
 	$(CXX) -o $* -MD $(CXXFLAGS) $< $(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES) ;
-	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
 	cp -p $@ $(BIN) ;
 
 .cxx:
 	$(CXX) -o $* -MD $(CXXFLAGS) $< $(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES) ;
-	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
+	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
+	cp -p $@ $(BIN) ;
+
+.rs:
+	$(RUSTC) -o $* --emit=link,dep-info=$*.d $(RSFLAGS) $< -L$(LIB) $(RS_LIBRARY:%=--extern $(RS_CRATE)=%) $(RS_EXTERN_ARGS) -C link-args="$(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES)" ;
+	@mv $@.d $@.tmp ; echo -e "$@ \c" | cat - $@.tmp > $@.d ; rm $@.tmp ; cat *.d > .depend 2>/dev/null ; true ;
 	@-test -f $(BIN)/$@ && mkdir -p $(BIN)/.old && mv -f $(BIN)/$@ $(BIN)/$@.old > /dev/null 2>&1 ; exit 0 ;
 	cp -p $@ $(BIN) ;
 
@@ -170,6 +243,10 @@ OBJS :=		$(C_SRCS:.c=.o) $(CC_SRCS:.cc=.o)
 L_C_SRCS :=	$(shell grep -L "[ 	]main(.*)\|^main(.*)" *.c 2>/dev/null )
 L_CC_SRCS :=	$(shell grep -L "[ 	]main(.*)\|^main(.*)" *.cc 2>/dev/null )
 L_OBJS :=	$(L_C_SRCS:.c=.o) $(L_CC_SRCS:.cc=.o)
+
+RS_SRCS :=	$(shell grep -l "fn main" *.rs 2>/dev/null )
+L_RS_SRCS :=	$(shell grep -L "fn main" *.rs 2>/dev/null )
+RS_CRATE :=	$(subst -,_,$(UNIT))
 
 ifneq	("$(L_CC_SRCS)","")
 
@@ -204,6 +281,18 @@ S_LIBRARY :=
 
 endif
 
+ifneq	("$(L_RS_SRCS)","")
+
+RS_LIBRARY :=	$(LIB)/lib$(RS_CRATE).rlib
+
+.PRECIOUS:	$(RS_LIBRARY)
+
+else
+
+RS_LIBRARY :=
+
+endif
+
 HTML :=		$(wildcard *.html)
 PICS :=		$(wildcard *.bmp *.gif *.jpg *.ico)
 STYLES :=	$(wildcard *.css *.js)
@@ -212,9 +301,10 @@ SCRIPTS :=	$(wildcard *.sh)
 H_SCRIPTS :=	$(wildcard *.hsh)
 
 EXECUTABLES :=	$(addprefix $(BIN)/,$(OBJS:.o=))	\
+		$(addprefix $(BIN)/,$(RS_SRCS:.rs=))	\
 		$(addprefix $(BIN)/,$(SCRIPTS:.sh=))
 
-PRODUCTS :=	$(OBJS:.o=)					\
+PRODUCTS :=	$(OBJS:.o=) $(RS_SRCS:.rs=)			\
 		$(EXECUTABLES)					\
 		$(addprefix $(CSS_DIR)/,$(STYLES))		\
 		$(addprefix $(IMG_DIR)/,$(PICS))		\
@@ -231,8 +321,23 @@ SOURCE :=	$(wildcard ?akefile)	\
 		$(CC_SRCS)		\
 		$(L_C_SRCS)		\
 		$(L_CC_SRCS)		\
+		$(RS_SRCS)		\
+		$(L_RS_SRCS)		\
 		$(SCRIPTS)		\
 		$(H_SCRIPTS)		\
 		$(HTML)			\
 		$(PICS)
 
+#
+#	Rust bindings: $(HDR)/foo.rs from an installed $(HDR)/foo.h (the list is
+#	RS_BINDINGS in targets.mak).  A foo.rs without the foo.rs.bindgen marker
+#	is handwritten and never overwritten.
+#
+
+$(HDR)/%.rs :	$(HDR)/%.h
+	@if [ -f $@ ] && [ ! -f $@.bindgen ]; then echo "error: $@ is handwritten (no $@.bindgen), not overwritten" >&2; exit 1; fi
+	$(BINDGEN) $< -o $@.tmp --depfile $@.d $(BINDGEN_FLAGS) -- $(INCLUDES) -I. $(RS_BINDGEN_CFLAGS) \
+		&& sed -i 's|$@.tmp|$@|' $@.d && mv -f $@.tmp $@ && touch $@.bindgen \
+		|| { rm -f $@.tmp ; echo "error: bindgen failed for $<" >&2 ; test "$(RS_BINDGEN)" != required ; }
+
+-include $(wildcard $(HDR)/*.rs.d)

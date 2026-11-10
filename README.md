@@ -49,11 +49,16 @@ Convention:
 
 `rules.mak` discovers sources automatically: `.c`/`.cc` with `main(` become
 programs; other `.c`/`.cc` go into the library. You do not list object files.
+Rust works the same way: `.rs` with `fn main` are programs, and the other
+`.rs` files form `~/lib/lib<unit>.rlib`.
 
 Each unit builds with its own makefile. The root makefile runs phases across
-selected units: **header → library → product**. For each unit it runs
+selected units: **header → bindings → library → product**. For each unit it runs
 `make -C <unit> -S <target>` and keeps going to the next unit so one pass shows
-good and bad units. Logs land in `header.log`, `library.log`, `product.log`.
+good and bad units. Combined logs land in `header.log`, `bindings.log`,
+`library.log`, `product.log`; each unit also gets `log/<phase>/<unit>.log`.
+Rust is optional (`RS_BINDGEN=auto`: generate `~/cmn/*.rs` when `bindgen` is
+available; otherwise C-only builds succeed). See `RUST.md`.
 
 `UNITS.md` is the longer make-system guide shipped in this repo.
 
@@ -66,13 +71,143 @@ Base is only the **project shell**:
 | `BASE` | Marker (`base-format: 1`); tools refuse trees without it |
 | `makefile` | Master build + project populate/fetch/units.mak restart |
 | `rules.mak` / `targets.mak` | Shared compile/install rules |
-| `base.units` | Units that ship inside base (**only `repo`**) |
+| `base.units` | Units that ship inside base (`repo`) |
 | `repo/` | Shell tools: `repo.sh`, `fetch-units.sh`, add/remove/list/… |
-| `bin/` `cmn/` `lib/` `hlp/` `run/` `tmp/` | Empty install dirs (`.gitkeep`) |
+| `.profile` / `.bash_profile` / `.bashrc` | The project login's dotfiles (base is the login directory) |
+| `bin/` | Empty install directory for programs (`~/bin`); not a unit |
+| `www/` `html/` `html_sh/` `cgi-bin/` `styles/` `images/` | Empty web / CGI administration directories (`WEB_DIR` … `IMG_DIR`); not units |
+| `cmn/` `lib/` `hlp/` `log/` `run/` `tmp/` | Install / log dirs (`.gitkeep` where empty) |
+| `RUST.md` | Optional Rust / bindgen make integration |
 | `project.repos.example` / `private.units.example` / `env.example` | Templates |
 
 `sys` and `atomic` are **not** in base; they are on the starter list and are
 fetched before compile.
+
+## Adding a language
+
+This is the standing rule for every language added to the unit system. Rust
+was the first one added this way (see `RUST.md`). A new language mirrors the
+C implementation rule for rule:
+
+1. **`rules.mak`** gets the language's defaults (compiler, flags) and a suffix
+   rule with **no dependencies**, modeled line for line on `.c:`. The rule
+   compiles and links with `$(LDFLAGS) $(LIBRARY2) -l$(UNIT) $(LIBRARIES)`,
+   fixes up the `.d` file, writes `.depend`, moves the old `$(BIN)` copy to
+   `.old`, and copies the program to `$(BIN)`.
+   Each C compile-only rule (`.c.o`, `.c.a`, `.c.s`, `.c.i`) gets a
+   no-dependency counterpart where the language has one, so C units can link
+   the language's objects directly (Rust: `.rs.o`, `.rs.a`, `.rs.s`). These
+   rules are opt-in and never change default discovery. A language that can
+   write a C header for its objects gets a suffix rule for that too (Rust:
+   `.rs.h`, via cbindgen), so the header and the C that includes it rebuild
+   through normal dependencies.
+2. **`rules.mak`** also gets the source lists, placed next to the C lists
+   (`C_SRCS`/`L_C_SRCS`, `LIBRARY`), and adds them to `EXECUTABLES`,
+   `PRODUCTS` and `SOURCE` where the C lists are added.
+3. **`targets.mak`** gets the dependency and pattern rules (`% : %.x
+   $(LIBRARY) ...`), the library rule next to the `ar` rule, and the install
+   and `clean` lines, all placed where the C ones are and shaped like them.
+4. Everything stays **overridable between `include ../rules.mak` and
+   `include ../targets.mak`**, as for C. A unit can change lists,
+   dependencies and rules there.
+5. **Drop-in works**: this is the unit system's existing convention for most
+   source-to-product types: `.c`, `.cc`, `.cxx` and `.rs` programs go to
+   `$(BIN)`, `.sh` scripts to `$(BIN)` without the suffix, `.hsh` to
+   `$(HSH_DIR)`, and `.html` to `$(HTML_DIR)`. A standalone file of any of
+   these types, dropped into any unit directory, builds or installs with plain
+   `make`. A new type must follow the same convention. For a language with a
+   main program, that holds in every kind of unit: C-only, C++, no library,
+   units with other languages, and units with overrides.
+
+Nothing language-specific is added unless the language needs it, and each
+such addition is documented with its reason (see `RUST.md`).
+
+## Project-per-login model
+
+Each project is its own login: **ROOT = `$HOME`**. The base repo *is* the login
+directory, so it ships the login's dotfiles at its root:
+
+| File | Read by | Holds |
+|---|---|---|
+| `.profile` | `sh`/`dash`/`ksh` logins, and `.bash_profile` | All the shared setup (POSIX sh) |
+| `.bash_profile` | bash logins | Sources `.profile`, sets `BASH_ENV=$HOME/.bashrc`, sources `.bashrc` |
+| `.bashrc` | interactive bash, and every non-interactive bash through `BASH_ENV` | Interactive settings only (history, prompt, `EDITOR`); silent and a no-op when not interactive, so make recipes are unaffected |
+| `.profile.local`, `.bashrc.local` | `.profile` / `.bashrc`, when present | Personal and **secret** settings (API keys, tokens, overrides). Gitignored; never put keys in the tracked files |
+
+Bootstrap a new project login:
+
+```sh
+# as the new login, in its (empty) home directory
+mkdir -p ~/.dotfiles.old; mv ~/.profile ~/.bash_profile ~/.bashrc ~/.dotfiles.old/ 2>/dev/null
+git clone https://github.com/smythereen/base.git /tmp/base.$$ &&
+	cp -a /tmp/base.$$/. ~ && rm -rf /tmp/base.$$   # a home is never empty, so clone beside it and copy in
+. ~/.bash_profile        # or log out and in again
+make
+```
+
+Back up any existing `.profile`, `.bash_profile` and `.bashrc` first, and move
+anything personal from them (keys especially) into `~/.profile.local`.
+After pulling a base update, re-login or run `. ~/.bash_profile`.
+
+What `.profile` sets up:
+
+- **Helpers** `define`, `def_dir`, `eliminate`, `prefix`, `postfix` (unset at
+  the end; usable in `.profile.local`). `prefix PATH dir` removes any existing
+  copy of `dir` before adding it, and skips a `dir` that does not exist, so
+  sourcing the profile again never duplicates `PATH` entries.
+- **`umask 002`** (group-writable files for shared development) and
+  **`ulimit -c unlimited`** (core dumps; ignored if the hard limit forbids it).
+- **`CDPATH=".:$HOME"`**: `cd sql` works from anywhere in the project. An
+  exported `CDPATH` makes `cd dir` print the directory in scripts, so scripts
+  that use `$(cd dir && pwd)` must `unset CDPATH` first (the repo tools do).
+- **`PATH`**: `~/bin` first, then `~/.bin`, `~/.local/bin`, `~/.cargo/bin`
+  (`rustc`, `bindgen`, `cbindgen`), then the system path.
+  **`LD_LIBRARY_PATH`**: `/usr/local/lib` and `~/lib` appended.
+- **`CC`/`CXX`**: `gcc`/`g++` unless already set.
+- **Project directories**: `run`, `run/pipes`, `run/database`, `bin`, `lib`,
+  `cmn`, `tmp`, `log`, `hlp` are created (only in a base tree, i.e. when
+  `~/BASE` exists) before the run paths are defined, so those are exported on
+  the very first login.
+- **Run paths** read by the units via `getenv` / `File_Path`: `ELOG_FILE`,
+  `FILE_PATH`, `DATA_PATH`, `PIPE_PATH`, `MEMORY_PATH`, `DATABASE_DIR`,
+  **`KILL_PATH`** (`~/bin/`, used by `far/farkill`), and `SCP_PATH` (only if
+  `~/scp` exists). Each `def_dir` path is exported only when its directory
+  exists. `MEMORY_ALL` and `TraceLevel` are commented examples.
+- **Web / CGI administration** (project servers with HTML-based project
+  administration), always exported, and not make-only: shell scripts and
+  server programs read them too. `WEB_DIR=~/www` (the Apache document root),
+  `HTML_DIR=~/html` (pages), `HSH_DIR=~/html_sh` (html scripts that modify
+  map memory and inject msg messages to control the server and display its
+  status), `CGI_BIN=~/cgi-bin` (CGI programs), `CSS_DIR=~/styles`
+  (`.css`, `.js`) and `IMG_DIR=~/images`. A value already in the environment
+  is kept. `rules.mak` uses the environment value too (`?=`), falling back to
+  the same defaults. The six default directories are visible (no leading dot)
+  and ship empty in base with a `.gitkeep`; their contents are gitignored and
+  none of them is a unit. Base has **no setuid or CGI install rule**: only the
+  `cgi` unit installs its programs setuid, running as the project's login.
+  **Cleaning the web directories is under review**: `make dist_clean` still
+  empties `$(CGI_BIN)`, `$(HTML_DIR)` and `$(HSH_DIR)` as before, which takes
+  a live web service down at once (unlike `~/bin`, where running programs
+  keep going until they re-spawn). A directory-swap / Apache symlink scheme
+  is being considered.
+- **`PROJECT`**: the single source of truth for the project name
+  (`proj init $(PROJECT)`). It defaults to the login name (project-per-login);
+  an inherited `PROJECT`, the `BOX` case, or `.profile.local` can set another.
+- **`UNITS`**: read from `units.mak`, the same list make uses.
+- **`BOX`** (the short host name) and an empty `case "${BOX}"` template for
+  per-machine settings: `PEERS` (`make copy_to_peer`), `OTHERS`, `TGT_HOST`
+  and any override.
+- On interactive logins only, a warning if `rustc` or `bindgen` is missing
+  (Rust is optional).
+
+`bin/` holds only a `.gitkeep`: it is where `make product` installs programs,
+not a unit.
+
+Historically **dev1** is the 24/7 production login; **dev2..devN** are
+test/development logins on one or many systems. A project's msg group number
+comes from looking up the login's user name in the `addr.mem` group table, so
+projects can message each other.
+
 
 ### Project list and lock (read these carefully)
 
@@ -109,7 +244,7 @@ With `REPO_AUTO` left at `yes` (default):
    (starter list from `$PROJECT_WORKER_URL`).
 2. `repo add` each asked-for unit (and transitive `require`s).
 3. When the lock is stale → `repo fetch --no-update`.
-4. Write `units.mak`, restart make, then `header` / `library` / `product`
+4. Write `units.mak`, restart make, then `header` / `bindings` / `library` / `product`
    (full rebuild if `.built` is missing or stale).
 
 ```sh
@@ -804,7 +939,7 @@ What that one `make` did:
    `UNITS changed, run: source ~/.bash_profile`, re-source your profile so
    the shell's `UNITS` matches.
 3. No `.built` yet (or `.rebuild-needed` newer) → **full rebuild**:
-   `cleanup`, then `header` (headers → `~/cmn`, `atomic` first), `library`
+   `cleanup`, then `header` (headers → `~/cmn`, `atomic` first), `bindings`, `library`
    (`~/lib/lib*.a`), `product` (`~/bin`). On success it writes `.built` and
    runs `repo rebuilt`.
 
@@ -955,7 +1090,7 @@ Limits, stated plainly:
   full clones; only its internal probe clones are shallow.) Keep your real git remote(s) and normal backups.
 - Live service data (`run/`, `event.log`, mapped `.mem` files, databases) is
   **per node** and is not a backup of anything; back it up separately.
-- Node-local settings (systemd instance names, `.bash_profile` edits,
+- Node-local settings (systemd instance names, `.profile.local` / `BOX` case edits,
   balancer config, secrets) are outside the synced source; exclude them from
   any sync and keep them in your ops records.
 - Confirm the copies really match with the identity check in step 9
@@ -2631,7 +2766,7 @@ GNU make + Unix `cc`/`ar`/`ranlib` on **Linux**. Public `sys` is
 ## File map (this repository)
 
 Tracked essentials: `BASE`, `LICENSE`, `LICENSES/`, `README.md`, `UNITS.md`,
-`base.units`, `makefile`, `rules.mak`, `targets.mak`, `env.example`,
+`.profile`, `.bash_profile`, `.bashrc`, `base.units`, `makefile`, the empty web directories (`www`, `html`, `html_sh`, `cgi-bin`, `styles`, `images`), `rules.mak`, `targets.mak`, `env.example`,
 `project.repos.example`, `private.units.example`, `repo/*`, empty
 `bin`/`cmn`/`hlp`/`lib`/`run`/`tmp` placeholders, `.gitignore`.
 

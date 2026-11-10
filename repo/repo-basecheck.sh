@@ -5,6 +5,7 @@
 # add-base-check.sh unit-makefile ... - insert templates/base-check.mak in front of the
 # "include ../rules.mak" line, so that make stops at once with a clear message when the
 # base repo is not installed.  Idempotent; keeps the old file as <file>.orig.
+unset CDPATH
 here=$(cd "$(dirname "$0")/.." && pwd)
 snippet=$here/templates/base-check.mak
 [ -f "$snippet" ] || { echo "add-base-check.sh: no $snippet" >&2; exit 2; }

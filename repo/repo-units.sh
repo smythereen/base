@@ -13,8 +13,8 @@
 #            and includes (make restarts itself when that file changes)
 #   --sh     the same as  UNITS="a b c"; export UNITS   for a shell profile
 #
-# ~/.bash_profile should read UNITS from units.mak (see env.example), so the shell and
-# make always agree.
+# ~/.profile (the base dotfile, sourced by ~/.bash_profile) reads UNITS from units.mak, so
+# the shell and make always agree.
 RL_PROG=repo-units
 . "$(dirname "$0")/repo-lib.sh" 2>/dev/null || . "$(dirname "$0")/repo-lib"
 FMT=list; DIR=
