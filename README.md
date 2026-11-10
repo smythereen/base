@@ -1,6 +1,8 @@
 # base
 
-Project bootstrap for John R. Smythe Jr.'s public C **unit** system.
+Project bootstrap for John R. Smythe Jr.'s public **unit** make system. It
+builds C, C++, and Rust — mixed in one unit or across units — for large and
+mixed-language projects.
 
 Clone **base** once per project. It ships the shared make files, empty install
 directories, and the **repo** unit that fetches other units. It does **not**
