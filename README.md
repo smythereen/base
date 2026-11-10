@@ -71,9 +71,10 @@ Base is only the **project shell**:
 | `BASE` | Marker (`base-format: 1`); tools refuse trees without it |
 | `makefile` | Master build + project populate/fetch/units.mak restart |
 | `rules.mak` / `targets.mak` | Shared compile/install rules |
-| `base.units` | Units that ship inside base (`repo`, `bin`) |
+| `base.units` | Units that ship inside base (`repo`) |
 | `repo/` | Shell tools: `repo.sh`, `fetch-units.sh`, add/remove/list/… |
-| `bin/` | Helpers unit: `profile_add` |
+| `.profile` / `.bash_profile` / `.bashrc` | The project login's dotfiles (base is the login directory) |
+| `bin/` | Empty install directory for programs (`~/bin`); not a unit |
 | `cmn/` `lib/` `hlp/` `log/` `run/` `tmp/` | Install / log dirs (`.gitkeep` where empty) |
 | `RUST.md` | Optional Rust / bindgen make integration |
 | `project.repos.example` / `private.units.example` / `env.example` | Templates |
@@ -122,12 +123,67 @@ such addition is documented with its reason (see `RUST.md`).
 
 ## Project-per-login model
 
-Each project is its own login: **ROOT = `$HOME`**. Bootstrap is: clone base into
-the new login's home, run `bin/profile_add` (writes a complete `~/.bash_profile`),
-re-login, then `make`. `profile_add` sets `PATH` (`$HOME/bin`, `$HOME/.cargo/bin`),
-`LD_LIBRARY_PATH` (`$HOME/lib`), and the runtime env vars units read via `getenv`
-/ `File_Path` (`MEMORY_PATH`, `FILE_PATH`, `ELOG_FILE`, `DATA_PATH`, `PIPE_PATH`,
-`DATABASE_DIR`, optional `MEMORY_ALL` / `TraceLevel`).
+Each project is its own login: **ROOT = `$HOME`**. The base repo *is* the login
+directory, so it ships the login's dotfiles at its root:
+
+| File | Read by | Holds |
+|---|---|---|
+| `.profile` | `sh`/`dash`/`ksh` logins, and `.bash_profile` | All the shared setup (POSIX sh) |
+| `.bash_profile` | bash logins | Sources `.profile`, sets `BASH_ENV=$HOME/.bashrc`, sources `.bashrc` |
+| `.bashrc` | interactive bash, and every non-interactive bash through `BASH_ENV` | Interactive settings only (history, prompt, `EDITOR`); silent and a no-op when not interactive, so make recipes are unaffected |
+| `.profile.local`, `.bashrc.local` | `.profile` / `.bashrc`, when present | Personal and **secret** settings (API keys, tokens, overrides). Gitignored; never put keys in the tracked files |
+
+Bootstrap a new project login:
+
+```sh
+# as the new login, in its (empty) home directory
+mkdir -p ~/.dotfiles.old; mv ~/.profile ~/.bash_profile ~/.bashrc ~/.dotfiles.old/ 2>/dev/null
+git clone https://github.com/smythereen/base.git /tmp/base.$$ &&
+	cp -a /tmp/base.$$/. ~ && rm -rf /tmp/base.$$   # a home is never empty, so clone beside it and copy in
+. ~/.bash_profile        # or log out and in again
+make
+```
+
+Back up any existing `.profile`, `.bash_profile` and `.bashrc` first, and move
+anything personal from them (keys especially) into `~/.profile.local`.
+After pulling a base update, re-login or run `. ~/.bash_profile`.
+
+What `.profile` sets up:
+
+- **Helpers** `define`, `def_dir`, `eliminate`, `prefix`, `postfix` (unset at
+  the end; usable in `.profile.local`). `prefix PATH dir` removes any existing
+  copy of `dir` before adding it, and skips a `dir` that does not exist, so
+  sourcing the profile again never duplicates `PATH` entries.
+- **`umask 002`** (group-writable files for shared development) and
+  **`ulimit -c unlimited`** (core dumps; ignored if the hard limit forbids it).
+- **`CDPATH=".:$HOME"`**: `cd sql` works from anywhere in the project. An
+  exported `CDPATH` makes `cd dir` print the directory in scripts, so scripts
+  that use `$(cd dir && pwd)` must `unset CDPATH` first (the repo tools do).
+- **`PATH`**: `~/bin` first, then `~/.bin`, `~/.local/bin`, `~/.cargo/bin`
+  (`rustc`, `bindgen`, `cbindgen`), then the system path.
+  **`LD_LIBRARY_PATH`**: `/usr/local/lib` and `~/lib` appended.
+- **`CC`/`CXX`**: `gcc`/`g++` unless already set.
+- **Project directories**: `run`, `run/pipes`, `run/database`, `bin`, `lib`,
+  `cmn`, `tmp`, `log`, `hlp` are created (only in a base tree, i.e. when
+  `~/BASE` exists) before the run paths are defined, so those are exported on
+  the very first login.
+- **Run paths** read by the units via `getenv` / `File_Path`: `ELOG_FILE`,
+  `FILE_PATH`, `DATA_PATH`, `PIPE_PATH`, `MEMORY_PATH`, `DATABASE_DIR`,
+  **`KILL_PATH`** (`~/bin/`, used by `far/farkill`), and `SCP_PATH` (only if
+  `~/scp` exists). Each `def_dir` path is exported only when its directory
+  exists. `MEMORY_ALL` and `TraceLevel` are commented examples.
+- **`PROJECT`**: the single source of truth for the project name
+  (`proj init $(PROJECT)`). It defaults to the login name (project-per-login);
+  an inherited `PROJECT`, the `BOX` case, or `.profile.local` can set another.
+- **`UNITS`**: read from `units.mak`, the same list make uses.
+- **`BOX`** (the short host name) and an empty `case "${BOX}"` template for
+  per-machine settings: `PEERS` (`make copy_to_peer`), `OTHERS`, `TGT_HOST`
+  and any override.
+- On interactive logins only, a warning if `rustc` or `bindgen` is missing
+  (Rust is optional).
+
+`bin/` holds only a `.gitkeep`: it is where `make product` installs programs,
+not a unit.
 
 Historically **dev1** is the 24/7 production login; **dev2..devN** are
 test/development logins on one or many systems. A project's msg group number
@@ -1016,7 +1072,7 @@ Limits, stated plainly:
   full clones; only its internal probe clones are shallow.) Keep your real git remote(s) and normal backups.
 - Live service data (`run/`, `event.log`, mapped `.mem` files, databases) is
   **per node** and is not a backup of anything; back it up separately.
-- Node-local settings (systemd instance names, `.bash_profile` edits,
+- Node-local settings (systemd instance names, `.profile.local` / `BOX` case edits,
   balancer config, secrets) are outside the synced source; exclude them from
   any sync and keep them in your ops records.
 - Confirm the copies really match with the identity check in step 9
@@ -2692,7 +2748,7 @@ GNU make + Unix `cc`/`ar`/`ranlib` on **Linux**. Public `sys` is
 ## File map (this repository)
 
 Tracked essentials: `BASE`, `LICENSE`, `LICENSES/`, `README.md`, `UNITS.md`,
-`base.units`, `makefile`, `rules.mak`, `targets.mak`, `env.example`,
+`.profile`, `.bash_profile`, `.bashrc`, `base.units`, `makefile`, `rules.mak`, `targets.mak`, `env.example`,
 `project.repos.example`, `private.units.example`, `repo/*`, empty
 `bin`/`cmn`/`hlp`/`lib`/`run`/`tmp` placeholders, `.gitignore`.
 

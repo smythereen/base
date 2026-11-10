@@ -54,7 +54,7 @@
 ##      			itself when it changes: the new units are in this very build.
 ##      			When the list changes make prints
 ##      			    UNITS changed, run: source ~/.bash_profile
-##      			(~/.bash_profile reads UNITS from units.mak, see env.example).
+##      			(~/.profile, sourced by ~/.bash_profile, reads UNITS from units.mak).
 ##      	.built          written after a full rebuild.  A FULL REBUILD (cleanup, then
 ##      			header library product) is done when .built is missing, when
 ##      			.rebuild-needed (written by repo add/update/fetch/remove) is newer
@@ -83,7 +83,7 @@
 ## Note: The newunit/populate/update targets use the modern Git project tools
 ## (proj / project-*) when available in ~/bin (the main project bin, populated
 ## by 'cd tools; make product' after the tools unit is obtained).
-## The PROJECT environment variable (defined in .bash_profile) is the single
+## The PROJECT environment variable (defined in .profile) is the single
 ## source of truth for the project name and is passed to 'proj init $(PROJECT)'.
 ##
 ## Examples:	make
@@ -151,6 +151,7 @@ SOURCE =	etcbashrc		\
 		makefile 		\
 		rules.mak 		\
 		targets.mak 		\
+		.profile 		\
 		.bash_profile 		\
 		.bashrc			\
 		.rpmmacros		\

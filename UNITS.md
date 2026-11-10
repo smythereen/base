@@ -53,7 +53,7 @@ To build somewhere other than the real home directory, set `HOME` for the make c
 What you need installed: GNU make, gcc and g++ (or another compiler, see section 9), `ar`, GNU grep and **bash**.
 `rules.mak` sets `SHELL := /bin/bash`, so every recipe runs under bash whatever `/bin/sh` is.
 
-The `.bash_profile` of the project login normally sets:
+The project login's dotfiles (`.profile` in the base repo, sourced by `.bash_profile`) set:
 
 | Variable | Used for |
 |---|---|
@@ -61,10 +61,11 @@ The `.bash_profile` of the project login normally sets:
 | `PATH` | Must include `~/bin` to run what you build |
 | `LD_LIBRARY_PATH` | Includes `~/lib` (only needed for shared libraries; they are off by default) |
 | `FILE_PATH`, `DATA_PATH`, `PIPE_PATH`, `MEMORY_PATH`, `ELOG_FILE` ... | Run-time paths under `~/run/`. The `msg` unit installs its `*.msg` files into `$(FILE_PATH)` |
+| `KILL_PATH` | `~/bin/`; used by `far/farkill` |
 | `PEERS`, `TGT_HOST` | Only for the `copy_to_*` targets (section 7) |
 | `PROJECT` | Project name, used by the source-control tools |
 
-Building the units that need nothing from `.bash_profile` works with just `CC` and `CXX` (or the defaults).
+Building the units that need nothing from the profile works with just `CC` and `CXX` (or the defaults).
 
 ## 3. How a unit is discovered
 

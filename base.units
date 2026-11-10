@@ -1,6 +1,6 @@
 # Units that ship inside the base repo (one per line).  They are never fetched,
 # and any "require <unit>" of one of them in a UNIT.deps file is already met.
 # sys and atomic are NOT here: they are in the starter list (project NONE) and
-# are fetched before compile. repo and bin ship with the base tree.
+# are fetched before compile. repo ships with the base tree.  bin is not a unit:
+# it is the empty install directory for programs (~/bin).
 repo		# the tools that maintain project.repos and fetch units
-bin		# helpers: profile_add

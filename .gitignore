@@ -17,9 +17,6 @@ core.*
 /tmp/*
 /log/*
 !/bin/.gitkeep
-!/bin/makefile
-!/bin/*.sh
-!/bin/profile_add
 !/lib/.gitkeep
 !/cmn/.gitkeep
 !/cmn/LICENSE
@@ -45,8 +42,10 @@ core.*
 .secrets/
 *.key
 *.pem
-.bash_profile
-.bashrc
+# the project dotfiles (.profile .bash_profile .bashrc) are tracked; personal and
+# secret settings go in these, which are not
+.profile.local
+.bashrc.local
 *.save
 *.old
 .old/
