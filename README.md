@@ -337,10 +337,11 @@ first. Exercised with `HOME=$PWD make` against the live catalog on Linux x86-64.
   (project.repos format). **Not** a JSON name→URL map on disk.
 
 The project worker's starter list (`GET /projects/NONE`) stays the nine
-core units. The catalog worker also lists the optional messaging units
-`addr`, `msg` and `near`, and the `trigger` and `sql` units (same JSON shape).
-`./repo/repo.sh add sql` (and `trigger` / `addr` / `msg` / `near`) resolves
-without a private URL. There is no public
+core units, including `now`. The catalog worker also lists the optional
+messaging units `addr`, `msg` and `near`, the `trigger` and `sql` units, and
+the `buf`, `cb` and `bcd` units (same JSON shape).
+`./repo/repo.sh add buf` (and `cb` / `bcd` / `sql` / `trigger` / `addr` /
+`msg` / `near`) resolves without a private URL. There is no public
 create/delete/governance API documented in base.
 
 ---
